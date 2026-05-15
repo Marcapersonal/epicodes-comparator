@@ -160,6 +160,9 @@ async function runBulkScrape(batchId) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  // node:sqlite cannot bind undefined or NaN — normalize to null
+  const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
+
   const rows = [];
   const matched = new Set();
 
@@ -173,16 +176,19 @@ async function runBulkScrape(batchId) {
     const saleDatesDb = detectSaleDates(game.title).map(d => d.date);
     const nextSale = predictNextSale(saleDatesDb);
 
-    const verdict = getVerdict(realCost, turkey?.priceUsd || null, {
+    const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
       minHistoricalUsd: minHist,
       giftCardRate,
       nextSalePrediction: nextSale,
     });
 
     rows.push([
-      batchId, game.title, game.priceUsd, game.priceRaw, game.discount, game.saleEnd,
-      turkey?.priceUsd || null, turkey?.url || null, realCost, minHist || null,
-      verdict.type, verdict.label, verdict.saving || 0, giftCardRate, now,
+      b(batchId), b(game.title), b(game.priceUsd), b(game.priceRaw),
+      b(game.discount) ?? 0, b(game.saleEnd),
+      b(turkey?.priceUsd) ?? null, b(turkey?.url) ?? null,
+      b(realCost), b(minHist) ?? null,
+      b(verdict.type), b(verdict.label),
+      b(verdict.saving) ?? 0, b(giftCardRate), b(now),
     ]);
   }
 
@@ -190,9 +196,9 @@ async function runBulkScrape(batchId) {
   for (const product of turkeyProducts) {
     if (matched.has(product.title)) continue;
     rows.push([
-      batchId, product.title, null, null, 0, null,
-      product.priceUsd, product.url, null, null,
-      'TURKEY_ONLY', '🇹🇷 Solo en Turquía', 0, giftCardRate, now,
+      b(batchId), b(product.title), null, null, 0, null,
+      b(product.priceUsd), b(product.url), null, null,
+      'TURKEY_ONLY', '🇹🇷 Solo en Turquía', 0, b(giftCardRate), b(now),
     ]);
   }
 
