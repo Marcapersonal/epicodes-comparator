@@ -89,9 +89,10 @@ function parseSearchResults(html) {
 async function searchPsStore(query) {
   const encoded = encodeURIComponent(query);
 
-  // Run AR and US searches in parallel
+  // Run AR and US searches in parallel; try es-ar as fallback if en-ar returns nothing
   const [arHtml, usHtml] = await Promise.all([
-    getHtml(`https://store.playstation.com/en-ar/search/${encoded}`).catch(() => null),
+    getHtml(`https://store.playstation.com/en-ar/search/${encoded}`)
+      .catch(() => getHtml(`https://store.playstation.com/es-ar/search/${encoded}`).catch(() => null)),
     getHtml(`https://store.playstation.com/en-us/search/${encoded}`).catch(() => null),
   ]);
 

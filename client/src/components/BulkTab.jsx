@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { api, createProgressStream, createHistoryStream } from '../api.js';
-import BulkTable from './BulkTable.jsx';
+import BulkTable  from './BulkTable.jsx';
+import ResultCard from './ResultCard.jsx';
 
 const FILTER_OPTIONS = [
   { value: 'ALL',          label: 'Todos' },
@@ -12,17 +13,28 @@ const FILTER_OPTIONS = [
 ];
 
 export default function BulkTab({ giftCardRate, showToast }) {
-  const [data,       setData]       = useState(null);
-  const [loading,       setLoading]       = useState(true);
-  const [running,       setRunning]       = useState(false);
-  const [progress,      setProgress]      = useState(null);
-  const [histRunning,   setHistRunning]   = useState(false);
-  const [histProgress,  setHistProgress]  = useState(null);
-  const [filter,        setFilter]        = useState('ALL');
-  const [minSaving,     setMinSaving]     = useState('');
-  const closeStream     = useRef(null);
+  // ── Bulk state ──────────────────────────────────────────────────────────────
+  const [data,         setData]         = useState(null);
+  const [loading,      setLoading]      = useState(true);
+  const [running,      setRunning]      = useState(false);
+  const [progress,     setProgress]     = useState(null);
+  const [filter,       setFilter]       = useState('ALL');
+  const [minSaving,    setMinSaving]    = useState('');
+  const closeStream    = useRef(null);
+
+  // ── History job state ───────────────────────────────────────────────────────
+  const [histRunning,  setHistRunning]  = useState(false);
+  const [histProgress, setHistProgress] = useState(null);
   const closeHistStream = useRef(null);
 
+  // ── Integrated search state ─────────────────────────────────────────────────
+  const [searchInput,   setSearchInput]   = useState('');
+  const [searchQuery,   setSearchQuery]   = useState('');   // committed query
+  const [searchResult,  setSearchResult]  = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError,   setSearchError]   = useState('');
+
+  // ── Load bulk data ──────────────────────────────────────────────────────────
   async function load(params = {}) {
     try {
       const d = await api.getBulk({ filter, minSaving, ...params });
@@ -40,6 +52,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
 
   useEffect(() => { load(); }, [filter, minSaving]); // eslint-disable-line
 
+  // ── Bulk refresh ────────────────────────────────────────────────────────────
   function listenProgress(batchId) {
     closeStream.current?.();
     closeStream.current = createProgressStream(batchId, (msg) => {
@@ -66,6 +79,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
     }
   }
 
+  // ── History job ─────────────────────────────────────────────────────────────
   function listenHistoryProgress(jobId) {
     closeHistStream.current?.();
     closeHistStream.current = createHistoryStream(jobId, (msg) => {
@@ -91,11 +105,48 @@ export default function BulkTab({ giftCardRate, showToast }) {
     }
   }
 
-  const results = data?.results || [];
+  // ── Integrated search ───────────────────────────────────────────────────────
+  async function handleSearch(e) {
+    e?.preventDefault();
+    const q = searchInput.trim();
+    if (!q) return;
+    setSearchQuery(q);
+    setSearchLoading(true);
+    setSearchError('');
+    setSearchResult(null);
+    try {
+      const data = await api.search(q);
+      setSearchResult(data);
+    } catch (err) {
+      setSearchError(err.message);
+    } finally {
+      setSearchLoading(false);
+    }
+  }
+
+  function clearSearch() {
+    setSearchInput('');
+    setSearchQuery('');
+    setSearchResult(null);
+    setSearchError('');
+  }
+
+  // Client-side filter: if there's text in the search bar but no committed
+  // query yet, filter the bulk table rows by game_name
+  const tableFilter = searchInput.trim() && !searchQuery
+    ? searchInput.trim().toLowerCase()
+    : '';
+
+  const results = useMemo(() => {
+    const rows = data?.results || [];
+    if (!tableFilter) return rows;
+    return rows.filter(r => r.game_name?.toLowerCase().includes(tableFilter));
+  }, [data, tableFilter]);
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
+      {/* ── Header row ───────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div className="card-title" style={{ margin: 0 }}>Explorar Ofertas</div>
           {data?.updatedAt && (
@@ -104,23 +155,71 @@ export default function BulkTab({ giftCardRate, showToast }) {
             </div>
           )}
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button
             className="btn btn-secondary"
             onClick={handleLoadHistory}
             disabled={histRunning || running}
-            title="Carga el historial completo de precios desde PSDeals (hacer 1 vez cada 3 meses)"
+            title="Carga historial completo de precios desde PSDeals (hacer 1 vez cada 3 meses)"
           >
             {histRunning
               ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Cargando historial...</>
               : '📊 Cargar Historial'}
           </button>
           <button className="btn btn-primary" onClick={handleRefresh} disabled={running || histRunning}>
-            {running ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</> : '🔄 Actualizar listado'}
+            {running
+              ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</>
+              : '🔄 Actualizar listado'}
           </button>
         </div>
       </div>
 
+      {/* ── Integrated search bar ─────────────────────────────────────────── */}
+      <form className="search-wrap" onSubmit={handleSearch} style={{ marginBottom: 12 }}>
+        <input
+          className="search-input"
+          type="text"
+          placeholder="Filtrar lista o buscar un juego exacto en PS Store..."
+          value={searchInput}
+          onChange={e => { setSearchInput(e.target.value); if (searchQuery) clearSearch(); }}
+          disabled={searchLoading}
+        />
+        {searchInput && (
+          <button type="button" className="btn btn-outline" onClick={clearSearch} style={{ padding: '9px 12px', fontSize: 16 }}>
+            ✕
+          </button>
+        )}
+        <button className="search-btn" type="submit" disabled={searchLoading || !searchInput.trim()}>
+          {searchLoading
+            ? <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} />
+            : '🔍'}
+        </button>
+      </form>
+
+      {/* ── Search result card ────────────────────────────────────────────── */}
+      {searchLoading && (
+        <div className="loading-wrap" style={{ marginBottom: 12 }}>
+          <span className="spinner" />
+          <span>Buscando "{searchQuery}" en PS Store AR + Turquía...</span>
+        </div>
+      )}
+      {searchError && (
+        <div className="card" style={{ borderColor: 'var(--red)', color: 'var(--red)', marginBottom: 12 }}>
+          ❌ {searchError}
+        </div>
+      )}
+      {searchResult && !searchLoading && (
+        <div style={{ marginBottom: 16 }}>
+          <ResultCard
+            result={searchResult}
+            giftCardRate={giftCardRate}
+            showToast={showToast}
+            onTrack={() => {}}
+          />
+        </div>
+      )}
+
+      {/* ── Bulk refresh progress ─────────────────────────────────────────── */}
       {running && progress && (
         <div className="card" style={{ marginBottom: 14 }}>
           <div className="progress-bar-wrap">
@@ -130,8 +229,9 @@ export default function BulkTab({ giftCardRate, showToast }) {
         </div>
       )}
 
+      {/* ── History job progress ──────────────────────────────────────────── */}
       {histRunning && histProgress && (
-        <div className="card" style={{ marginBottom: 14, borderColor: 'var(--yellow)' }}>
+        <div className="card" style={{ marginBottom: 14, borderColor: 'rgba(255,193,7,.4)' }}>
           <div style={{ fontSize: 12, color: 'var(--yellow)', marginBottom: 6, fontWeight: 600 }}>
             📊 Cargando historial de precios desde PSDeals
           </div>
@@ -147,6 +247,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
         </div>
       )}
 
+      {/* ── Filter bar ───────────────────────────────────────────────────── */}
       <div className="filter-bar">
         <span className="filter-label">Filtrar:</span>
         <select className="filter-select" value={filter} onChange={e => setFilter(e.target.value)}>
@@ -163,7 +264,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
         />
         {results.length > 0 && (
           <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 'auto' }}>
-            {results.length} juegos
+            {results.length} juegos{tableFilter ? ` (filtrado de ${data?.results?.length})` : ''}
           </span>
         )}
       </div>
@@ -172,13 +273,22 @@ export default function BulkTab({ giftCardRate, showToast }) {
         <div className="loading-wrap"><span className="spinner" /><span>Cargando resultados...</span></div>
       )}
 
-      {!loading && results.length === 0 && !running && (
+      {!loading && results.length === 0 && !running && !tableFilter && (
         <div className="empty">
           <div className="empty-icon">📋</div>
           <div className="empty-text">
             {data?.batchId
               ? 'Sin resultados con los filtros actuales.'
               : 'Hacé clic en "Actualizar listado" para scrapear todas las ofertas actuales.'}
+          </div>
+        </div>
+      )}
+
+      {!loading && results.length === 0 && tableFilter && (
+        <div className="empty">
+          <div className="empty-icon">🔍</div>
+          <div className="empty-text">
+            No hay resultados para "{tableFilter}" en el listado. Presioná Enter para buscar en PS Store directamente.
           </div>
         </div>
       )}

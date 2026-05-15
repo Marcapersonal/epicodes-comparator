@@ -118,8 +118,10 @@ a:hover { text-decoration: underline; }
 }
 .btn-primary  { background: var(--primary); color: #fff; }
 .btn-primary:hover { background: var(--primary-h); }
-.btn-outline  { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.btn-outline    { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 .btn-outline:hover { color: var(--text); border-color: var(--muted); }
+.btn-secondary  { background: rgba(255,193,7,.15); color: var(--yellow); border: 1px solid rgba(255,193,7,.35); }
+.btn-secondary:hover { background: rgba(255,193,7,.25); }
 .btn-danger   { background: transparent; color: var(--red); border: 1px solid rgba(255,82,82,.3); }
 .btn-danger:hover { background: rgba(255,82,82,.1); }
 .btn-success  { background: var(--green); color: #000; }

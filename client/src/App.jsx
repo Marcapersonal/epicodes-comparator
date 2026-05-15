@@ -1,19 +1,17 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from './api.js';
-import SearchTab    from './components/SearchTab.jsx';
 import BulkTab      from './components/BulkTab.jsx';
 import WatchlistTab from './components/WatchlistTab.jsx';
 import SettingsTab  from './components/SettingsTab.jsx';
 
 const TABS = [
-  { id: 'search',    label: '🔍 Buscar'          },
-  { id: 'bulk',      label: '📋 Explorar Ofertas' },
+  { id: 'bulk',      label: '🎮 Explorar Ofertas' },
   { id: 'watchlist', label: '⭐ Watchlist'        },
   { id: 'settings',  label: '⚙️ Configuración'    },
 ];
 
 export default function App() {
-  const [tab, setTab]               = useState('search');
+  const [tab, setTab]               = useState('bulk');
   const [giftCardRate, setGiftCardRate] = useState(0.72);
   const [toasts, setToasts]         = useState([]);
 
@@ -53,7 +51,6 @@ export default function App() {
       </header>
 
       <main className="main">
-        {tab === 'search'    && <SearchTab    giftCardRate={giftCardRate} showToast={showToast} />}
         {tab === 'bulk'      && <BulkTab      giftCardRate={giftCardRate} showToast={showToast} />}
         {tab === 'watchlist' && <WatchlistTab giftCardRate={giftCardRate} showToast={showToast} />}
         {tab === 'settings'  && <SettingsTab  giftCardRate={giftCardRate} onRateChange={onRateChange} showToast={showToast} />}
