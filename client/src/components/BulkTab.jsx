@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { api, createProgressStream } from '../api.js';
+import { api, createProgressStream, createHistoryStream } from '../api.js';
 import BulkTable from './BulkTable.jsx';
 
 const FILTER_OPTIONS = [
@@ -13,12 +13,15 @@ const FILTER_OPTIONS = [
 
 export default function BulkTab({ giftCardRate, showToast }) {
   const [data,       setData]       = useState(null);
-  const [loading,    setLoading]    = useState(true);
-  const [running,    setRunning]    = useState(false);
-  const [progress,   setProgress]   = useState(null);
-  const [filter,     setFilter]     = useState('ALL');
-  const [minSaving,  setMinSaving]  = useState('');
-  const closeStream  = useRef(null);
+  const [loading,       setLoading]       = useState(true);
+  const [running,       setRunning]       = useState(false);
+  const [progress,      setProgress]      = useState(null);
+  const [histRunning,   setHistRunning]   = useState(false);
+  const [histProgress,  setHistProgress]  = useState(null);
+  const [filter,        setFilter]        = useState('ALL');
+  const [minSaving,     setMinSaving]     = useState('');
+  const closeStream     = useRef(null);
+  const closeHistStream = useRef(null);
 
   async function load(params = {}) {
     try {
@@ -63,6 +66,31 @@ export default function BulkTab({ giftCardRate, showToast }) {
     }
   }
 
+  function listenHistoryProgress(jobId) {
+    closeHistStream.current?.();
+    closeHistStream.current = createHistoryStream(jobId, (msg) => {
+      setHistProgress(msg);
+      if (msg.status === 'done' || msg.status === 'error') {
+        setHistRunning(false);
+        closeHistStream.current?.();
+        if (msg.status === 'done') showToast?.(`📊 ${msg.message}`);
+      }
+    });
+  }
+
+  async function handleLoadHistory() {
+    if (histRunning || running) return;
+    setHistRunning(true);
+    setHistProgress({ message: 'Conectando con PSDeals...', progress: 0 });
+    try {
+      const { jobId } = await api.startHistoryFetch();
+      listenHistoryProgress(jobId);
+    } catch (e) {
+      setHistRunning(false);
+      showToast?.(`Error: ${e.message}`);
+    }
+  }
+
   const results = data?.results || [];
 
   return (
@@ -76,9 +104,21 @@ export default function BulkTab({ giftCardRate, showToast }) {
             </div>
           )}
         </div>
-        <button className="btn btn-primary" onClick={handleRefresh} disabled={running}>
-          {running ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</> : '🔄 Actualizar listado'}
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn btn-secondary"
+            onClick={handleLoadHistory}
+            disabled={histRunning || running}
+            title="Carga el historial completo de precios desde PSDeals (hacer 1 vez cada 3 meses)"
+          >
+            {histRunning
+              ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Cargando historial...</>
+              : '📊 Cargar Historial'}
+          </button>
+          <button className="btn btn-primary" onClick={handleRefresh} disabled={running || histRunning}>
+            {running ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</> : '🔄 Actualizar listado'}
+          </button>
+        </div>
       </div>
 
       {running && progress && (
@@ -87,6 +127,23 @@ export default function BulkTab({ giftCardRate, showToast }) {
             <div className="progress-bar" style={{ width: `${progress.progress || 0}%` }} />
           </div>
           <div className="progress-msg">{progress.message}</div>
+        </div>
+      )}
+
+      {histRunning && histProgress && (
+        <div className="card" style={{ marginBottom: 14, borderColor: 'var(--yellow)' }}>
+          <div style={{ fontSize: 12, color: 'var(--yellow)', marginBottom: 6, fontWeight: 600 }}>
+            📊 Cargando historial de precios desde PSDeals
+          </div>
+          <div className="progress-bar-wrap">
+            <div className="progress-bar" style={{ width: `${histProgress.progress || 0}%`, background: 'var(--yellow)' }} />
+          </div>
+          <div className="progress-msg">{histProgress.message}</div>
+          {histProgress.saved > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+              {histProgress.saved} juegos con historial guardado
+            </div>
+          )}
         </div>
       )}
 

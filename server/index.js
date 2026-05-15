@@ -9,6 +9,7 @@ const bulkRoutes     = require('./routes/bulk');
 const watchlistRoutes = require('./routes/watchlist');
 const settingsRoutes = require('./routes/settings');
 const alertsRoutes   = require('./routes/alerts');
+const historyRoutes  = require('./routes/history');
 const { startCron }  = require('./services/cronService');
 
 const app  = express();
@@ -26,6 +27,7 @@ app.use('/api/bulk',      bulkRoutes);
 app.use('/api/watchlist', watchlistRoutes);
 app.use('/api/settings',  settingsRoutes);
 app.use('/api/alerts',    alertsRoutes);
+app.use('/api/history',   historyRoutes);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 

@@ -36,10 +36,23 @@ export const api = {
 
   // Alerts history
   getAlerts:      ()        => apiFetch('/alerts'),
+
+  // Price history bootstrap
+  startHistoryFetch: ()    => apiFetch('/history/fetch', { method: 'POST' }),
+  getHistoryStatus:  ()    => apiFetch('/history/status'),
 };
 
 export function createProgressStream(batchId, onMessage) {
   const es = new EventSource(`/api/bulk/progress/${batchId}`);
+  es.onmessage = (e) => {
+    try { onMessage(JSON.parse(e.data)); } catch (_) {}
+  };
+  es.onerror = () => es.close();
+  return () => es.close();
+}
+
+export function createHistoryStream(jobId, onMessage) {
+  const es = new EventSource(`/api/history/progress/${jobId}`);
   es.onmessage = (e) => {
     try { onMessage(JSON.parse(e.data)); } catch (_) {}
   };
