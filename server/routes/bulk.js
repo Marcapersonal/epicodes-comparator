@@ -160,10 +160,6 @@ async function runBulkScrape(batchId) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const insertMany = db.transaction((rows) => {
-    for (const r of rows) insertBulk.run(...r);
-  });
-
   const rows = [];
   const matched = new Set();
 
@@ -200,7 +196,14 @@ async function runBulkScrape(batchId) {
     ]);
   }
 
-  insertMany(rows);
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) insertBulk.run(...r);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
 
   activeBatch = { id: batchId, status: 'done', message: `✅ Completado — ${rows.length} juegos procesados`, progress: 100 };
   broadcastProgress(batchId, activeBatch);
