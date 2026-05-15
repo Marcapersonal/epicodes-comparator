@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const { searchPsDeals }     = require('../scrapers/psdeals');
+const { searchPsStoreAR }   = require('../scrapers/psstore');
 const { searchGamesTurkey } = require('../scrapers/gamesturkey');
 const { getVerdict, predictNextSale } = require('../services/comparison');
 const { getGiftCardRate, getMinHistoricalPrice, getPriceDetailHistory, detectSaleDates } = require('../db/database');
@@ -12,7 +12,7 @@ router.get('/', async (req, res) => {
   try {
     // Run both scrapers in parallel
     const [psResult, turkeyResult] = await Promise.allSettled([
-      searchPsDeals(query),
+      searchPsStoreAR(query),
       searchGamesTurkey(query),
     ]);
 
@@ -44,14 +44,16 @@ router.get('/', async (req, res) => {
       query,
       giftCardRate,
       psStore: {
-        found:    ps.found,
-        title:    ps.title,
-        priceUsd: ps.priceUsd,
-        priceRaw: ps.priceRaw,
-        discount: ps.discount,
-        saleEnd:  ps.saleEnd,
-        detailUrl: ps.detailUrl,
-        error:    ps.error,
+        found:            ps.found,
+        title:            ps.title,
+        priceUsd:         ps.priceUsd,
+        priceRaw:         ps.priceRaw,
+        discount:         ps.discount,
+        originalPriceUsd: ps.originalPriceUsd || null,
+        saleEnd:          ps.saleEnd,
+        detailUrl:        ps.detailUrl,
+        usPriceUsd:       ps.usPriceUsd || null,
+        error:            ps.error,
       },
       turkey: {
         found:    turkey.found,

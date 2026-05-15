@@ -2,14 +2,14 @@ const express = require('express');
 const router  = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const Fuse = require('fuse.js');
-const { scrapeAllDeals }    = require('../scrapers/psdeals');
+const { bulkLookup }        = require('../scrapers/psstore');
 const { scrapeAllProducts } = require('../scrapers/gamesturkey');
-const { getVerdict, predictNextSale } = require('../services/comparison');
-const { getDb, getGiftCardRate, getMinHistoricalPrice, detectSaleDates } = require('../db/database');
+const { getVerdict }        = require('../services/comparison');
+const { getDb, getGiftCardRate, getMinHistoricalPrice } = require('../db/database');
 
 // In-memory SSE clients and progress state
-const progressClients = new Map(); // batchId → Set<res>
-let activeBatch = null; // { id, status, progress }
+const progressClients = new Map();
+let activeBatch = null;
 
 function broadcastProgress(batchId, data) {
   const clients = progressClients.get(batchId);
@@ -20,7 +20,7 @@ function broadcastProgress(batchId, data) {
   }
 }
 
-// GET /api/bulk — last completed batch results
+// ── GET /api/bulk ─────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
   const db = getDb();
   const latestBatch = db.prepare(
@@ -30,42 +30,27 @@ router.get('/', (req, res) => {
   if (!latestBatch) return res.json({ results: [], batchId: null, updatedAt: null });
 
   const { filter, sort, minSaving } = req.query;
-
-  let query = 'SELECT * FROM bulk_results WHERE batch_id = ?';
+  let query  = 'SELECT * FROM bulk_results WHERE batch_id = ?';
   const params = [latestBatch.batch_id];
 
-  if (filter && filter !== 'ALL') {
-    query += ' AND verdict = ?';
-    params.push(filter);
-  }
-  if (minSaving) {
-    query += ' AND saving_usd >= ?';
-    params.push(parseFloat(minSaving));
-  }
+  if (filter && filter !== 'ALL') { query += ' AND verdict = ?'; params.push(filter); }
+  if (minSaving) { query += ' AND saving_usd >= ?'; params.push(parseFloat(minSaving)); }
 
-  const sortMap = {
-    saving:      'saving_usd DESC',
-    cheapest:    'real_cost_usd ASC',
-    verdict:     'verdict ASC',
-  };
+  const sortMap = { saving: 'saving_usd DESC', cheapest: 'real_cost_usd ASC', verdict: 'verdict ASC' };
   query += ` ORDER BY ${sortMap[sort] || 'saving_usd DESC'}`;
 
-  const rows = db.prepare(query).all(...params);
-
   res.json({
-    results:   rows,
+    results:   db.prepare(query).all(...params),
     batchId:   latestBatch.batch_id,
     updatedAt: latestBatch.ts,
     active:    activeBatch,
   });
 });
 
-// GET /api/bulk/status — current scrape status
-router.get('/status', (_req, res) => {
-  res.json({ active: activeBatch });
-});
+// ── GET /api/bulk/status ──────────────────────────────────────────────────────
+router.get('/status', (_req, res) => res.json({ active: activeBatch }));
 
-// GET /api/bulk/progress/:batchId — SSE stream
+// ── GET /api/bulk/progress/:batchId — SSE stream ──────────────────────────────
 router.get('/progress/:batchId', (req, res) => {
   const { batchId } = req.params;
   res.setHeader('Content-Type', 'text/event-stream');
@@ -75,36 +60,27 @@ router.get('/progress/:batchId', (req, res) => {
 
   if (!progressClients.has(batchId)) progressClients.set(batchId, new Set());
   progressClients.get(batchId).add(res);
-
-  // Send current state immediately if available
-  if (activeBatch?.id === batchId) {
-    res.write(`data: ${JSON.stringify(activeBatch)}\n\n`);
-  }
-
-  req.on('close', () => {
-    progressClients.get(batchId)?.delete(res);
-  });
+  if (activeBatch?.id === batchId) res.write(`data: ${JSON.stringify(activeBatch)}\n\n`);
+  req.on('close', () => progressClients.get(batchId)?.delete(res));
 });
 
-// POST /api/bulk/refresh — start a new bulk scrape
-router.post('/refresh', async (req, res) => {
-  if (activeBatch && activeBatch.status === 'running') {
+// ── POST /api/bulk/refresh ────────────────────────────────────────────────────
+router.post('/refresh', (req, res) => {
+  if (activeBatch?.status === 'running') {
     return res.status(409).json({ error: 'Ya hay un scrape en curso', batchId: activeBatch.id });
   }
 
   const batchId = uuidv4();
-  activeBatch = { id: batchId, status: 'running', message: 'Iniciando...', progress: 0, total: 0 };
+  activeBatch = { id: batchId, status: 'running', message: 'Iniciando...', progress: 0 };
   res.json({ batchId });
 
-  // 5-minute hard timeout — always fires complete/error so SSE never hangs
   const timeout = setTimeout(() => {
     if (activeBatch?.status === 'running') {
-      console.warn('Bulk scrape timed out after 5 minutes');
       activeBatch = { id: batchId, status: 'error', message: '⏱ Tiempo agotado — intentá de nuevo' };
       broadcastProgress(batchId, activeBatch);
       setTimeout(() => progressClients.delete(batchId), 10000);
     }
-  }, 5 * 60 * 1000);
+  }, 8 * 60 * 1000);
 
   runBulkScrape(batchId)
     .catch(err => {
@@ -115,90 +91,90 @@ router.post('/refresh', async (req, res) => {
     .finally(() => clearTimeout(timeout));
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 async function runBulkScrape(batchId) {
-  const emit = (data) => {
-    Object.assign(activeBatch, data);
-    broadcastProgress(batchId, activeBatch);
-  };
+  const emit = (data) => { Object.assign(activeBatch, data); broadcastProgress(batchId, activeBatch); };
+  const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
 
-  emit({ message: '📦 Scrapeando ofertas de PSDeals AR...', progress: 5 });
-
-  let psGames = [];
-  try {
-    psGames = await scrapeAllDeals((prog) => {
-      emit({ message: `PSDeals — página ${prog.page} | ${prog.count} juegos encontrados`, progress: 10 + prog.page });
-    });
-  } catch (err) {
-    console.error('PSDeals bulk error:', err.message);
-    emit({ message: `⚠️ PSDeals falló (${err.message}), continuando con Turquía...`, progress: 35 });
-  }
-
-  emit({ message: `✅ PSDeals: ${psGames.length} juegos. Scrapeando GamesturkeyACC...`, progress: 40 });
-
+  // STEP 1 — Scrape GamesturkeyACC catalog
+  emit({ message: '🇹🇷 Scrapeando catálogo de GamesturkeyACC...', progress: 5 });
   let turkeyProducts = [];
   try {
     turkeyProducts = await scrapeAllProducts([1, 12, 13, 21], (prog) => {
-      emit({ message: `GamesturkeyACC — cat ${prog.category} pág ${prog.page} | ${prog.total} productos`, progress: 50 + Math.min(prog.total / 5, 15) });
+      emit({ message: `GamesturkeyACC — ${prog.total} productos`, progress: 5 + Math.min(prog.total / 3, 15) });
     });
   } catch (err) {
-    console.error('GamesturkeyACC bulk error:', err.message);
-    emit({ message: `⚠️ GamesturkeyACC falló (${err.message}), usando solo PSDeals...`, progress: 65 });
+    console.error('GamesturkeyACC error:', err.message);
+    emit({ message: `⚠️ GamesturkeyACC falló: ${err.message}`, progress: 20 });
   }
 
-  emit({ message: `✅ Turquía: ${turkeyProducts.length} productos. Cruzando datos...`, progress: 70 });
+  if (!turkeyProducts.length) {
+    activeBatch = { id: batchId, status: 'error', message: '❌ No se pudieron obtener productos de GamesturkeyACC' };
+    broadcastProgress(batchId, activeBatch);
+    return;
+  }
 
-  // Fuzzy-match PSDeals games against Turkey products
-  const fuse = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.35 });
+  emit({ message: `✅ ${turkeyProducts.length} productos de Turkey. Buscando precios en PS Store AR + US...`, progress: 20 });
+
+  // STEP 2 — Lookup each Turkey game on PS Store AR and US in parallel
+  const titles = turkeyProducts.map(p => p.title);
+  const psResults = await bulkLookup(titles, (prog) => {
+    const pct = 20 + Math.round((prog.completed / prog.total) * 65);
+    emit({ message: `PS Store — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
+  });
+
+  emit({ message: '💾 Cruzando datos y guardando...', progress: 87 });
+
+  // STEP 3 — Cross-match and compute verdicts
   const giftCardRate = getGiftCardRate();
-  const db = getDb();
+  const db  = getDb();
   const now = new Date().toISOString();
+
+  // Build Turkey lookup map
+  const turkeyMap = new Map(turkeyProducts.map(p => [p.title, p]));
 
   const insertBulk = db.prepare(`
     INSERT INTO bulk_results
       (batch_id, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
-       turkey_price, turkey_url, real_cost_usd, min_hist_usd, verdict, verdict_label, saving_usd, gift_card_rate, scraped_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       turkey_price, turkey_url, real_cost_usd, min_hist_usd,
+       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  // node:sqlite cannot bind undefined or NaN — normalize to null
-  const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
-
   const rows = [];
-  const matched = new Set();
 
-  for (const game of psGames) {
-    const hits = fuse.search(game.title);
-    const turkey = hits.length > 0 ? hits[0].item : null;
-    if (turkey) matched.add(turkey.title);
+  for (let i = 0; i < titles.length; i++) {
+    const turkey = turkeyMap.get(titles[i]);
+    const ps     = psResults[i];
+    const ar     = ps?.ar || null;
+    const us     = ps?.us || null;
 
-    const realCost = game.priceUsd != null ? Math.round(game.priceUsd * giftCardRate * 100) / 100 : null;
-    const minHist  = getMinHistoricalPrice(game.title);
-    const saleDatesDb = detectSaleDates(game.title).map(d => d.date);
-    const nextSale = predictNextSale(saleDatesDb);
+    const arPriceUsd = ar?.priceUsd ?? null;
+    const realCost   = arPriceUsd != null ? Math.round(arPriceUsd * giftCardRate * 100) / 100 : null;
+    const minHist    = getMinHistoricalPrice(titles[i]);
 
     const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
       minHistoricalUsd: minHist,
       giftCardRate,
-      nextSalePrediction: nextSale,
     });
 
     rows.push([
-      b(batchId), b(game.title), b(game.priceUsd), b(game.priceRaw),
-      b(game.discount) ?? 0, b(game.saleEnd),
-      b(turkey?.priceUsd) ?? null, b(turkey?.url) ?? null,
-      b(realCost), b(minHist) ?? null,
-      b(verdict.type), b(verdict.label),
-      b(verdict.saving) ?? 0, b(giftCardRate), b(now),
-    ]);
-  }
-
-  // Turkey-only (no PSDeals match)
-  for (const product of turkeyProducts) {
-    if (matched.has(product.title)) continue;
-    rows.push([
-      b(batchId), b(product.title), null, null, 0, null,
-      b(product.priceUsd), b(product.url), null, null,
-      'TURKEY_ONLY', '🇹🇷 Solo en Turquía', 0, b(giftCardRate), b(now),
+      b(batchId),
+      b(turkey?.title || titles[i]),
+      b(arPriceUsd),
+      b(ar?.priceRaw) ?? null,
+      b(ar?.discountPct) ?? 0,
+      b(ar?.saleEnd) ?? null,
+      b(turkey?.priceUsd) ?? null,
+      b(turkey?.url) ?? null,
+      b(realCost),
+      b(minHist) ?? null,
+      b(verdict.type),
+      b(verdict.label),
+      b(verdict.saving) ?? 0,
+      b(giftCardRate),
+      b(now),
+      b(us?.priceUsd) ?? null,
     ]);
   }
 
@@ -211,10 +187,12 @@ async function runBulkScrape(batchId) {
     throw e;
   }
 
-  activeBatch = { id: batchId, status: 'done', message: `✅ Completado — ${rows.length} juegos procesados`, progress: 100 };
+  const withAr = rows.filter(r => r[2] != null).length;
+  activeBatch = {
+    id: batchId, status: 'done', progress: 100,
+    message: `✅ Completado — ${rows.length} juegos | ${withAr} con precio AR | ${rows.length - withAr} solo Turkey`,
+  };
   broadcastProgress(batchId, activeBatch);
-
-  // Clean up SSE clients after a delay
   setTimeout(() => progressClients.delete(batchId), 60000);
 }
 

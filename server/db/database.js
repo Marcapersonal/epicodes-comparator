@@ -91,6 +91,10 @@ function _migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_pshd_game   ON ps_price_history_detail(game_name);
   `);
 
+  // Add new columns if they don't exist yet (safe to run on existing DBs)
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN us_price_usd REAL'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_original_price_usd REAL'); } catch (_) {}
+
   // Default settings
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('gift_card_rate', '0.72');
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('ars_to_usd', process.env.ARS_TO_USD || '1200');
