@@ -73,11 +73,15 @@ export default function BulkTable({ rows, giftCardRate }) {
                     {isOpen ? '▾ ' : '▸ '}{r.game_name}
                   </td>
                   <td>
-                    {fmt(r.ps_price_usd)}
+                    {r.ps_detail_url
+                      ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{fmt(r.ps_price_usd)}</a>
+                      : fmt(r.ps_price_usd)}
                     {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 4 }}>-{r.ps_discount_pct}%</span>}
                   </td>
                   <td style={{ color: 'var(--muted)', fontSize: 13 }}>
-                    {r.us_price_usd != null ? fmt(r.us_price_usd) : <span style={{ color: 'var(--dim)' }}>—</span>}
+                    {r.us_price_usd != null
+                      ? <a href={`https://store.playstation.com/en-us/search/${encodeURIComponent(r.game_name)}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'var(--muted)' }}>{fmt(r.us_price_usd)}</a>
+                      : <span style={{ color: 'var(--dim)' }}>—</span>}
                   </td>
                   <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
                   <td>

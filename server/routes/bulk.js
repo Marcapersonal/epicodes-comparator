@@ -137,8 +137,8 @@ async function runBulkScrape(batchId) {
     INSERT INTO bulk_results
       (batch_id, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
        turkey_price, turkey_url, real_cost_usd, min_hist_usd,
-       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const rows = [];
@@ -175,6 +175,7 @@ async function runBulkScrape(batchId) {
       b(giftCardRate),
       b(now),
       b(us?.priceUsd) ?? null,
+      b(ar?.detailUrl) ?? null,
     ]);
   }
 
