@@ -55,6 +55,7 @@ export default function BulkTable({ rows, giftCardRate }) {
           <tr>
             {th('game_name',    'Juego')}
             {th('ps_price_usd', 'PS Store AR')}
+            {th('us_price_usd', 'PS Store US')}
             {th('_realCost',    'Tu costo real')}
             {th('turkey_price', 'Turquía')}
             {th('_saving',      'Ahorro')}
@@ -75,6 +76,9 @@ export default function BulkTable({ rows, giftCardRate }) {
                     {fmt(r.ps_price_usd)}
                     {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 4 }}>-{r.ps_discount_pct}%</span>}
                   </td>
+                  <td style={{ color: 'var(--muted)', fontSize: 13 }}>
+                    {r.us_price_usd != null ? fmt(r.us_price_usd) : <span style={{ color: 'var(--dim)' }}>—</span>}
+                  </td>
                   <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
                   <td>
                     {r.turkey_price
@@ -90,7 +94,7 @@ export default function BulkTable({ rows, giftCardRate }) {
                 </tr>
                 {isOpen && (
                   <tr key={`${i}-detail`}>
-                    <td colSpan="6" style={{ background: 'var(--surface)', padding: '12px 16px' }}>
+                    <td colSpan="7" style={{ background: 'var(--surface)', padding: '12px 16px' }}>
                       <div style={{ fontSize: 13, color: 'var(--muted)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
                         <div>Mínimo histórico: <b style={{ color: 'var(--text)' }}>{fmt(r.min_hist_usd)}</b></div>
                         <div>Costo al mínimo: <b style={{ color: 'var(--primary-h)' }}>{calcRealCost(r.min_hist_usd, giftCardRate) ? fmt(calcRealCost(r.min_hist_usd, giftCardRate)) : '—'}</b></div>

@@ -54,12 +54,21 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
             <td className={psStore?.priceUsd ? '' : 'price-red'}>
               {psStore?.found ? (
                 <>
+                  {psStore.originalPriceUsd && psStore.originalPriceUsd !== psStore.priceUsd
+                    ? <><s style={{ color: 'var(--dim)', fontSize: 12 }}>{fmt(psStore.originalPriceUsd)}</s>{' '}</>
+                    : null}
                   {fmt(psStore.priceUsd)}
                   {psStore.discount ? <span style={{ color: 'var(--green)', marginLeft: 6, fontSize: 12 }}>-{psStore.discount}%</span> : null}
                 </>
               ) : <span style={{ color: 'var(--dim)' }}>No encontrado</span>}
             </td>
           </tr>
+          {psStore?.usPriceUsd != null && (
+            <tr>
+              <td>Precio PS Store US</td>
+              <td style={{ color: 'var(--muted)', fontSize: 13 }}>{fmt(psStore.usPriceUsd)}</td>
+            </tr>
+          )}
           <tr>
             <td>Tu costo real (×{giftCardRate.toFixed(2)})</td>
             <td className="price-highlight">{fmt(realCost)}</td>
@@ -121,7 +130,7 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
           rel="noreferrer"
           style={{ marginLeft: 10, fontSize: 12, color: 'var(--muted)' }}
         >
-          Ver en PSDeals ↗
+          Ver en PS Store ↗
         </a>
       )}
     </div>
