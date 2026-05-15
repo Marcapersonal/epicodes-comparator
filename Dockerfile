@@ -1,5 +1,5 @@
 # ── Stage 1: build React client ───────────────────────────────────────────────
-FROM node:20-slim AS client-builder
+FROM node:22-slim AS client-builder
 
 WORKDIR /app/client
 COPY client/package*.json ./
@@ -8,7 +8,7 @@ COPY client/ ./
 RUN npm run build
 
 # ── Stage 2: production server ────────────────────────────────────────────────
-FROM node:20-slim
+FROM node:22-slim
 
 # Playwright / Chromium system deps
 RUN apt-get update && apt-get install -y \
