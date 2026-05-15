@@ -96,12 +96,23 @@ router.post('/refresh', async (req, res) => {
   activeBatch = { id: batchId, status: 'running', message: 'Iniciando...', progress: 0, total: 0 };
   res.json({ batchId });
 
-  // Run async in background
-  runBulkScrape(batchId).catch(err => {
-    console.error('Bulk scrape error:', err);
-    activeBatch = { id: batchId, status: 'error', message: err.message };
-    broadcastProgress(batchId, activeBatch);
-  });
+  // 5-minute hard timeout — always fires complete/error so SSE never hangs
+  const timeout = setTimeout(() => {
+    if (activeBatch?.status === 'running') {
+      console.warn('Bulk scrape timed out after 5 minutes');
+      activeBatch = { id: batchId, status: 'error', message: '⏱ Tiempo agotado — intentá de nuevo' };
+      broadcastProgress(batchId, activeBatch);
+      setTimeout(() => progressClients.delete(batchId), 10000);
+    }
+  }, 5 * 60 * 1000);
+
+  runBulkScrape(batchId)
+    .catch(err => {
+      console.error('Bulk scrape error:', err);
+      activeBatch = { id: batchId, status: 'error', message: err.message };
+      broadcastProgress(batchId, activeBatch);
+    })
+    .finally(() => clearTimeout(timeout));
 });
 
 async function runBulkScrape(batchId) {
@@ -110,17 +121,29 @@ async function runBulkScrape(batchId) {
     broadcastProgress(batchId, activeBatch);
   };
 
-  emit({ message: '📦 Scrapeando ofertas de PSDeals AR...', progress: 0 });
+  emit({ message: '📦 Scrapeando ofertas de PSDeals AR...', progress: 5 });
 
-  const psGames = await scrapeAllDeals((prog) => {
-    emit({ message: `PSDeals — página ${prog.page} | ${prog.count} juegos`, progress: 10 });
-  });
+  let psGames = [];
+  try {
+    psGames = await scrapeAllDeals((prog) => {
+      emit({ message: `PSDeals — página ${prog.page} | ${prog.count} juegos encontrados`, progress: 10 + prog.page });
+    });
+  } catch (err) {
+    console.error('PSDeals bulk error:', err.message);
+    emit({ message: `⚠️ PSDeals falló (${err.message}), continuando con Turquía...`, progress: 35 });
+  }
 
   emit({ message: `✅ PSDeals: ${psGames.length} juegos. Scrapeando GamesturkeyACC...`, progress: 40 });
 
-  const turkeyProducts = await scrapeAllProducts([1, 12, 21], (prog) => {
-    emit({ message: `GamesturkeyACC — cat ${prog.category} pág ${prog.page} | ${prog.total} productos`, progress: 60 });
-  });
+  let turkeyProducts = [];
+  try {
+    turkeyProducts = await scrapeAllProducts([1, 12, 13, 21], (prog) => {
+      emit({ message: `GamesturkeyACC — cat ${prog.category} pág ${prog.page} | ${prog.total} productos`, progress: 50 + Math.min(prog.total / 5, 15) });
+    });
+  } catch (err) {
+    console.error('GamesturkeyACC bulk error:', err.message);
+    emit({ message: `⚠️ GamesturkeyACC falló (${err.message}), usando solo PSDeals...`, progress: 65 });
+  }
 
   emit({ message: `✅ Turquía: ${turkeyProducts.length} productos. Cruzando datos...`, progress: 70 });
 

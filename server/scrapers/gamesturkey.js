@@ -1,150 +1,129 @@
-const { chromium } = require('playwright-extra');
-const stealth = require('puppeteer-extra-plugin-stealth');
-const Fuse = require('fuse.js');
+const axios   = require('axios');
+const cheerio = require('cheerio');
+const Fuse    = require('fuse.js');
 
-chromium.use(stealth());
+const BASE = 'https://gamesturkeyacc.com';
 
-const HEADLESS = process.env.PLAYWRIGHT_HEADLESS !== 'false';
-const BASE_DELAY = parseInt(process.env.SCRAPER_DELAY_MS || '1500', 10);
-const EXECUTABLE = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined;
-
-const LAUNCH_OPTS = {
-  headless: HEADLESS,
-  executablePath: EXECUTABLE,
-  args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept':     'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
 };
 
-async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function randomDelay()   { return sleep(BASE_DELAY + Math.random() * BASE_DELAY); }
+async function getHtml(url) {
+  const { data } = await axios.get(url, { headers: HEADERS, timeout: 20000 });
+  return data;
+}
 
 function parseUsdPrice(text) {
   if (!text) return null;
-  const m = text.match(/[\d]+[.,]?[\d]*/);
+  const m = text.match(/\$?\s*([\d]+\.?[\d]*)/);
   if (!m) return null;
-  const num = parseFloat(m[0].replace(',', '.'));
-  return isNaN(num) ? null : num;
+  const num = parseFloat(m[1]);
+  return isNaN(num) || num === 0 ? null : num;
+}
+
+// GamesturkeyACC is a PHP server-rendered site. Product cards are identified
+// by their "product_details" links. Each card div contains an h3 (title) and
+// a span with class "text-primary font-bold" (price).
+function extractProducts(html) {
+  const $        = cheerio.load(html);
+  const products = [];
+  const seenHrefs = new Set();
+
+  $('a[href*="product_details"]').each((_, linkEl) => {
+    const href = $(linkEl).attr('href') || '';
+    if (!href || seenHrefs.has(href)) return;
+    seenHrefs.add(href);
+
+    // Walk up until we find a container that has an h3 (the product card)
+    let $card = $(linkEl).parent();
+    let depth = 0;
+    while ($card.length && !$card.find('h3').length && depth < 6) {
+      $card = $card.parent();
+      depth++;
+    }
+    if (!$card.find('h3').length) return;
+
+    const title    = $card.find('h3').first().text().trim();
+    if (!title) return;
+
+    // Price is in a span that contains "$"
+    const priceRaw = $card.find('span').filter((_, s) => $(s).text().includes('$'))
+                          .first().text().trim();
+
+    const url = href.startsWith('http') ? href : `${BASE}/${href.replace(/^\//, '')}`;
+
+    products.push({
+      title,
+      priceUsd: parseUsdPrice(priceRaw),
+      priceRaw,
+      url,
+    });
+  });
+
+  return products;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SEARCH — fuzzy-match a single game
+//  SEARCH — fuzzy match a single game
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchGamesTurkey(query) {
-  const browser = await chromium.launch(LAUNCH_OPTS);
   try {
-    const page = await browser.newPage();
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-    });
+    const html     = await getHtml(`${BASE}/product_search.php?query=${encodeURIComponent(query)}`);
+    const products = extractProducts(html);
 
-    const url = `https://gamesturkeyacc.com/product_search.php?query=${encodeURIComponent(query)}`;
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await randomDelay();
+    if (!products.length) return { found: false, query };
 
-    const results = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll(
-        '.product-item, [class*="product-card"], [class*="game-item"], .item, li[class*="product"]'
-      ));
-      return items.map(el => {
-        const titleEl = el.querySelector('[class*="title"], [class*="name"], h3, h4, .product-title, a');
-        const priceEl = el.querySelector('[class*="price"], .price, [class*="cost"]');
-        const linkEl  = el.querySelector('a');
-        return {
-          title:    titleEl?.textContent?.trim() || '',
-          priceRaw: priceEl?.textContent?.trim() || '',
-          href:     linkEl?.getAttribute('href') || '',
-        };
-      }).filter(i => i.title);
-    });
-
-    if (!results.length) {
-      return { found: false, query };
-    }
-
-    // Fuzzy match
-    const fuse = new Fuse(results, { keys: ['title'], threshold: 0.4 });
-    const hits  = fuse.search(query);
-
+    const fuse = new Fuse(products, { keys: ['title'], threshold: 0.4 });
+    const hits = fuse.search(query);
     if (!hits.length) return { found: false, query };
 
     const best = hits[0].item;
-    const price = parseUsdPrice(best.priceRaw);
-
-    return {
-      found:    true,
-      title:    best.title,
-      priceUsd: price,
-      priceRaw: best.priceRaw,
-      url:      best.href.startsWith('http') ? best.href : `https://gamesturkeyacc.com${best.href}`,
-    };
-  } finally {
-    await browser.close();
+    return { found: true, ...best };
+  } catch (err) {
+    console.error('GamesturkeyACC search error:', err.message);
+    return { found: false, query, error: err.message };
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BULK — scrape all products from given category ids
+//  BULK — scrape all category pages (single page each, no pagination needed)
 // ─────────────────────────────────────────────────────────────────────────────
-async function scrapeAllProducts(categoryIds = [1, 12, 21], onProgress) {
-  const browser = await chromium.launch(LAUNCH_OPTS);
+async function scrapeAllProducts(categoryIds = [1, 12, 13, 21], onProgress) {
   const allProducts = [];
+  const seenUrls    = new Set();
 
-  try {
-    const page = await browser.newPage();
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36',
-    });
+  for (const catId of categoryIds) {
+    // Each category loads all its products server-side on one page.
+    // We still try a second page in case the site adds pagination later.
+    for (let page = 1; page <= 5; page++) {
+      const url = page === 1
+        ? `${BASE}/product_category.php?category_id=${catId}`
+        : `${BASE}/product_category.php?category_id=${catId}&page=${page}`;
 
-    for (const catId of categoryIds) {
-      let pageNum = 1;
-      let hasMore = true;
+      try {
+        const html  = await getHtml(url);
+        const items = extractProducts(html);
 
-      while (hasMore) {
-        const url = `https://gamesturkeyacc.com/product_search.php?query=&category_id=${catId}&page=${pageNum}`;
-        try {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await randomDelay();
+        if (!items.length) break;
 
-          const items = await page.evaluate(() => {
-            const els = Array.from(document.querySelectorAll(
-              '.product-item, [class*="product-card"], [class*="game-card"], .item, li[class*="product"]'
-            ));
-            return els.map(el => {
-              const titleEl = el.querySelector('[class*="title"], [class*="name"], h3, h4, a');
-              const priceEl = el.querySelector('[class*="price"], .price');
-              const linkEl  = el.querySelector('a');
-              return {
-                title:    titleEl?.textContent?.trim() || '',
-                priceRaw: priceEl?.textContent?.trim() || '',
-                href:     linkEl?.getAttribute('href') || '',
-              };
-            }).filter(i => i.title);
-          });
-
-          if (!items.length) { hasMore = false; break; }
-
-          for (const item of items) {
-            allProducts.push({
-              title:    item.title,
-              priceUsd: parseUsdPrice(item.priceRaw),
-              priceRaw: item.priceRaw,
-              url:      item.href.startsWith('http') ? item.href : `https://gamesturkeyacc.com${item.href}`,
-              categoryId: catId,
-            });
-          }
-
-          if (onProgress) onProgress({ category: catId, page: pageNum, total: allProducts.length, status: 'gamesturkey' });
-
-          hasMore = items.length >= 10;
-          pageNum++;
-          if (pageNum > 20) hasMore = false;
-        } catch (err) {
-          console.warn(`GamesturkeyACC cat=${catId} page=${pageNum} error:`, err.message);
-          hasMore = false;
+        let added = 0;
+        for (const item of items) {
+          if (seenUrls.has(item.url)) continue;
+          seenUrls.add(item.url);
+          allProducts.push({ ...item, categoryId: catId });
+          added++;
         }
+
+        if (onProgress) onProgress({ category: catId, page, total: allProducts.length, status: 'gamesturkey' });
+
+        // If we got nothing new or fewer than 10 items, stop paginating
+        if (added === 0 || items.length < 10) break;
+      } catch (err) {
+        console.warn(`GamesturkeyACC cat=${catId} page=${page}:`, err.message);
+        break;
       }
     }
-  } finally {
-    await browser.close();
   }
 
   return allProducts;
