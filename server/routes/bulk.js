@@ -6,7 +6,9 @@ const { bulkLookup }        = require('../scrapers/psstore');
 const { scrapeAllProducts } = require('../scrapers/gamesturkey');
 const { getVerdict }        = require('../services/comparison');
 const { getDb, getGiftCardRate, getMinHistoricalPrice } = require('../db/database');
-const historyRoute = require('./history');
+// Lazy-loaded to prevent playwright-extra/stealth from patching Node internals at startup
+let _historyRoute = null;
+function getHistoryRoute() { return _historyRoute || (_historyRoute = require('./history')); }
 
 // In-memory SSE clients and progress state
 const progressClients = new Map();
@@ -211,7 +213,7 @@ async function runBulkScrape(batchId) {
 
   // Auto-start history fetch for any new games without history (runs in background)
   setImmediate(() => {
-    try { historyRoute.startHistoryJob('auto-after-bulk'); } catch (_) {}
+    try { getHistoryRoute().startHistoryJob('auto-after-bulk'); } catch (_) {}
   });
 }
 

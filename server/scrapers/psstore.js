@@ -25,22 +25,26 @@ function getHeaders() {
 const PROXY_BASE = 'https://api.allorigins.win/get?url=';
 
 async function getHtml(url) {
+  let directHtml = '';
   try {
     const { data } = await axios.get(url, { headers: getHeaders(), timeout: 20000 });
-    return typeof data === 'string' ? data : '';
-  } catch (err) {
-    // Only use proxy on network/HTTP errors, not on successful-but-empty responses
-    if (!err.response || err.response.status >= 500) {
-      try {
-        const { data } = await axios.get(
-          `${PROXY_BASE}${encodeURIComponent(url)}`,
-          { headers: { 'User-Agent': USER_AGENTS[0] }, timeout: 25000 }
-        );
-        return data?.contents || '';
-      } catch (_) {}
-    }
-    return '';
-  }
+    directHtml = typeof data === 'string' ? data : '';
+  } catch (_) {}
+
+  // PS Store pages are 100KB+; anything smaller is a bot-detection/CAPTCHA page.
+  // Fall through to proxy when the direct response is too small to contain real results.
+  if (directHtml.length >= 20000) return directHtml;
+
+  try {
+    const { data } = await axios.get(
+      `${PROXY_BASE}${encodeURIComponent(url)}`,
+      { headers: { 'User-Agent': USER_AGENTS[0] }, timeout: 25000 }
+    );
+    const proxyHtml = data?.contents || '';
+    return proxyHtml.length > directHtml.length ? proxyHtml : directHtml;
+  } catch (_) {}
+
+  return directHtml;
 }
 
 function parseUsd(text) {
