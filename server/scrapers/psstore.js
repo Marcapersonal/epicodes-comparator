@@ -3,16 +3,44 @@ const cheerio = require('cheerio');
 const Fuse    = require('fuse.js');
 const { recordPrice } = require('../db/database');
 
-const HEADERS = {
-  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-};
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+];
+
+function getHeaders() {
+  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+  return {
+    'User-Agent':      ua,
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control':   'no-cache',
+    'Referer':         'https://www.google.com/',
+    'sec-fetch-dest':  'document',
+    'sec-fetch-mode':  'navigate',
+    'sec-fetch-site':  'cross-site',
+  };
+}
+
+const PROXY_BASE = 'https://api.allorigins.win/get?url=';
 
 async function getHtml(url) {
-  const { data } = await axios.get(url, { headers: HEADERS, timeout: 20000 });
-  return data;
+  // Try direct first; fall back to allorigins proxy if blocked (cloud IP detection)
+  try {
+    const { data } = await axios.get(url, { headers: getHeaders(), timeout: 20000 });
+    // Detect empty/challenge responses
+    if (typeof data === 'string' && data.length > 10000) return data;
+    throw new Error('Response too short — likely blocked');
+  } catch (_) {
+    const { data } = await axios.get(
+      `${PROXY_BASE}${encodeURIComponent(url)}`,
+      { headers: { 'User-Agent': USER_AGENTS[0] }, timeout: 25000 }
+    );
+    return data?.contents || '';
+  }
 }
 
 function parseUsd(text) {
@@ -89,10 +117,9 @@ function parseSearchResults(html) {
 async function searchPsStore(query) {
   const encoded = encodeURIComponent(query);
 
-  // Run AR and US searches in parallel; try es-ar as fallback if en-ar returns nothing
+  // Run AR and US searches in parallel (getHtml handles proxy fallback internally)
   const [arHtml, usHtml] = await Promise.all([
-    getHtml(`https://store.playstation.com/en-ar/search/${encoded}`)
-      .catch(() => getHtml(`https://store.playstation.com/es-ar/search/${encoded}`).catch(() => null)),
+    getHtml(`https://store.playstation.com/en-ar/search/${encoded}`).catch(() => null),
     getHtml(`https://store.playstation.com/en-us/search/${encoded}`).catch(() => null),
   ]);
 
