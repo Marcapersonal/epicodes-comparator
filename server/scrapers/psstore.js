@@ -19,9 +19,6 @@ function getHeaders() {
     'Accept-Encoding': 'gzip, deflate, br',
     'Cache-Control':   'no-cache',
     'Referer':         'https://www.google.com/',
-    'sec-fetch-dest':  'document',
-    'sec-fetch-mode':  'navigate',
-    'sec-fetch-site':  'cross-site',
   };
 }
 
@@ -183,12 +180,13 @@ async function searchPsStoreAR(query) {
 //  Public: bulk lookup — given a list of Turkey game titles, find each on
 //  PS Store AR + US, with concurrency control (max 6 parallel requests)
 // ─────────────────────────────────────────────────────────────────────────────
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
 async function bulkLookup(titles, onProgress) {
-  const CONCURRENCY = 6;
+  const CONCURRENCY = 3; // Low concurrency to avoid cloud-IP rate limiting
   const results     = new Array(titles.length).fill(null);
   let   completed   = 0;
 
-  // Simple semaphore-based concurrency
   async function worker(idx) {
     const title = titles[idx];
     try {
@@ -199,6 +197,8 @@ async function bulkLookup(titles, onProgress) {
     }
     completed++;
     if (onProgress) onProgress({ completed, total: titles.length, current: title });
+    // Small random delay to avoid triggering rate limits on Railway IPs
+    await delay(300 + Math.random() * 400);
   }
 
   const queue = titles.map((_, i) => i);
