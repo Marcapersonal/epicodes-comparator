@@ -1,8 +1,13 @@
 const cron = require('node-cron');
 const { getDb, getGiftCardRate } = require('../db/database');
-const { searchPsDeals }     = require('../scrapers/psdeals');
-const { searchGamesTurkey } = require('../scrapers/gamesturkey');
-const { sendAlert } = require('./alertService');
+const { searchPsStoreAR }    = require('../scrapers/psstore');
+const { searchGamesTurkey }  = require('../scrapers/gamesturkey');
+const { sendAlert }          = require('./alertService');
+
+// Lazy-load to avoid circular dependency at startup
+function getHistoryStarter() {
+  return require('../routes/history').startHistoryJob;
+}
 
 async function checkWatchlist() {
   const db = getDb();
@@ -17,16 +22,18 @@ async function checkWatchlist() {
 
   for (const item of items) {
     try {
-      const [psResult] = await Promise.allSettled([searchPsDeals(item.game_name)]);
+      const [psResult, turkeyResult] = await Promise.allSettled([
+        searchPsStoreAR(item.game_name),
+        searchGamesTurkey(item.game_name),
+      ]);
       const ps = psResult.status === 'fulfilled' ? psResult.value : null;
       if (!ps?.priceUsd) continue;
 
       const realCost = Math.round(ps.priceUsd * giftCardRate * 100) / 100;
 
       if (realCost <= item.alert_price) {
-        // Get last price from history to calculate drop
         const lastPriceRow = db.prepare(
-          `SELECT price_usd FROM price_history WHERE game_name = ? AND source = 'psdeals' ORDER BY scraped_at DESC LIMIT 2`
+          `SELECT price_usd FROM price_history WHERE game_name = ? AND source = 'psstore-ar' ORDER BY scraped_at DESC LIMIT 2`
         ).all(item.game_name);
         const oldPrice = lastPriceRow[1] ? lastPriceRow[1].price_usd * giftCardRate : null;
 
@@ -35,7 +42,7 @@ async function checkWatchlist() {
           gameName:    item.game_name,
           oldPrice,
           newPrice:    realCost,
-          psdealsUrl:  item.psdeals_url,
+          psdealsUrl:  ps.detailUrl || item.psdeals_url,
         });
       }
 
@@ -47,24 +54,24 @@ async function checkWatchlist() {
   }
 }
 
-async function runDailyBulk() {
-  try {
-    // Trigger bulk via the route's logic (import runBulkScrape separately to avoid circular deps)
-    console.log('[cron] Daily bulk scrape triggered — use POST /api/bulk/refresh for full run.');
-  } catch (err) {
-    console.error('[cron] Daily bulk error:', err.message);
-  }
-}
-
 function startCron() {
-  // Every day at 09:00 server time
+  // Daily watchlist check at 09:00
   cron.schedule('0 9 * * *', async () => {
-    console.log('[cron] Daily watchlist check starting...');
+    console.log('[cron] Daily watchlist check...');
     await checkWatchlist();
-    await runDailyBulk();
-    console.log('[cron] Done.');
+    console.log('[cron] Watchlist done.');
   });
-  console.log('[cron] Scheduler started — daily check at 09:00');
+
+  // Weekly history top-up: every Monday at 03:00
+  // Fetches history only for games that don't have it yet (incremental, fast after first run)
+  cron.schedule('0 3 * * 1', () => {
+    console.log('[cron] Weekly history top-up...');
+    try { getHistoryStarter()('cron-weekly'); } catch (err) {
+      console.error('[cron] History start error:', err.message);
+    }
+  });
+
+  console.log('[cron] Scheduler started — daily watchlist 09:00 | weekly history Mon 03:00');
 }
 
 module.exports = { startCron, checkWatchlist };

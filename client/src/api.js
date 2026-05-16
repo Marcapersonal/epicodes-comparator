@@ -37,9 +37,9 @@ export const api = {
   // Alerts history
   getAlerts:      ()        => apiFetch('/alerts'),
 
-  // Price history bootstrap
+  // Price history (auto-persisted, reconnects on page load)
   startHistoryFetch: ()    => apiFetch('/history/fetch', { method: 'POST' }),
-  getHistoryStatus:  ()    => apiFetch('/history/status'),
+  getHistoryStatus:  ()    => apiFetch('/history/status'),  // returns { active, stats }
 };
 
 export function createProgressStream(batchId, onMessage) {

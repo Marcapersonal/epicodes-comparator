@@ -6,6 +6,7 @@ const { bulkLookup }        = require('../scrapers/psstore');
 const { scrapeAllProducts } = require('../scrapers/gamesturkey');
 const { getVerdict }        = require('../services/comparison');
 const { getDb, getGiftCardRate, getMinHistoricalPrice } = require('../db/database');
+const historyRoute = require('./history');
 
 // In-memory SSE clients and progress state
 const progressClients = new Map();
@@ -195,6 +196,11 @@ async function runBulkScrape(batchId) {
   };
   broadcastProgress(batchId, activeBatch);
   setTimeout(() => progressClients.delete(batchId), 60000);
+
+  // Auto-start history fetch for any new games without history (runs in background)
+  setImmediate(() => {
+    try { historyRoute.startHistoryJob('auto-after-bulk'); } catch (_) {}
+  });
 }
 
 module.exports = router;

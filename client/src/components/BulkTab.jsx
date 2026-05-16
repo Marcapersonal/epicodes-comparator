@@ -25,6 +25,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
   // ── History job state ───────────────────────────────────────────────────────
   const [histRunning,  setHistRunning]  = useState(false);
   const [histProgress, setHistProgress] = useState(null);
+  const [histStats,    setHistStats]    = useState(null);
   const closeHistStream = useRef(null);
 
   // ── Integrated search state ─────────────────────────────────────────────────
@@ -51,6 +52,18 @@ export default function BulkTab({ giftCardRate, showToast }) {
   }
 
   useEffect(() => { load(); }, [filter, minSaving]); // eslint-disable-line
+
+  // On mount: check if a history job is already running server-side and reconnect
+  useEffect(() => {
+    api.getHistoryStatus().then(({ active, stats }) => {
+      if (stats) setHistStats(stats);
+      if (active?.status === 'running') {
+        setHistRunning(true);
+        setHistProgress(active);
+        listenHistoryProgress(active.id);
+      }
+    }).catch(() => {});
+  }, []); // eslint-disable-line
 
   // ── Bulk refresh ────────────────────────────────────────────────────────────
   function listenProgress(batchId) {
@@ -88,6 +101,8 @@ export default function BulkTab({ giftCardRate, showToast }) {
         setHistRunning(false);
         closeHistStream.current?.();
         if (msg.status === 'done') showToast?.(`📊 ${msg.message}`);
+        // Refresh stats after job completes
+        api.getHistoryStatus().then(({ stats }) => { if (stats) setHistStats(stats); }).catch(() => {});
       }
     });
   }
@@ -160,11 +175,11 @@ export default function BulkTab({ giftCardRate, showToast }) {
             className="btn btn-secondary"
             onClick={handleLoadHistory}
             disabled={histRunning || running}
-            title="Carga historial completo de precios desde PSDeals (hacer 1 vez cada 3 meses)"
+            title={histStats ? `${histStats.gamesWithHistory}/${histStats.totalGames} juegos con historial. Último: ${histStats.lastCompleted ? new Date(histStats.lastCompleted).toLocaleDateString('es-AR') : 'nunca'}` : 'Cargar historial de precios desde PSDeals'}
           >
             {histRunning
               ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Cargando historial...</>
-              : '📊 Cargar Historial'}
+              : <>📊 Historial{histStats ? ` (${histStats.gamesWithHistory}/${histStats.totalGames})` : ''}</>}
           </button>
           <button className="btn btn-primary" onClick={handleRefresh} disabled={running || histRunning}>
             {running
