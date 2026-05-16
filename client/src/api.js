@@ -40,6 +40,11 @@ export const api = {
   // Price history (auto-persisted, reconnects on page load)
   startHistoryFetch: ()    => apiFetch('/history/fetch', { method: 'POST' }),
   getHistoryStatus:  ()    => apiFetch('/history/status'),  // returns { active, stats }
+
+  // Catalog
+  getCatalog:       ()     => apiFetch('/catalog'),
+  addToCatalog:     (name) => apiFetch('/catalog', { method: 'POST', body: JSON.stringify({ name }) }),
+  removeFromCatalog:(id)   => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
 };
 
 export function createProgressStream(batchId, onMessage) {

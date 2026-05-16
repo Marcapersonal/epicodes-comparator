@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const { searchPsStoreAR }   = require('../scrapers/psstore');
+const { searchPsStoreUS }   = require('../scrapers/psstore');
 const { searchGamesTurkey } = require('../scrapers/gamesturkey');
 const { getVerdict, predictNextSale } = require('../services/comparison');
 const { getGiftCardRate, getMinHistoricalPrice, getPriceDetailHistory, detectSaleDates } = require('../db/database');
@@ -12,7 +12,7 @@ router.get('/', async (req, res) => {
   try {
     // Run both scrapers in parallel
     const [psResult, turkeyResult] = await Promise.allSettled([
-      searchPsStoreAR(query),
+      searchPsStoreUS(query),
       searchGamesTurkey(query),
     ]);
 

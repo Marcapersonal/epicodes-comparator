@@ -22,6 +22,12 @@ export default function BulkTab({ giftCardRate, showToast }) {
   const [minSaving,    setMinSaving]    = useState('');
   const closeStream    = useRef(null);
 
+  // ── Catalog state ───────────────────────────────────────────────────────────
+  const [catalogOpen,  setCatalogOpen]  = useState(false);
+  const [catalog,      setCatalog]      = useState([]);
+  const [addInput,     setAddInput]     = useState('');
+  const [addLoading,   setAddLoading]   = useState(false);
+
   // ── History job state ───────────────────────────────────────────────────────
   const [histRunning,  setHistRunning]  = useState(false);
   const [histProgress, setHistProgress] = useState(null);
@@ -64,6 +70,40 @@ export default function BulkTab({ giftCardRate, showToast }) {
       }
     }).catch(() => {});
   }, []); // eslint-disable-line
+
+  // On mount: load catalog
+  useEffect(() => {
+    api.getCatalog().then(d => setCatalog(d.games || [])).catch(() => {});
+  }, []); // eslint-disable-line
+
+  // ── Catalog handlers ────────────────────────────────────────────────────────
+  async function handleAddToCatalog(e) {
+    e?.preventDefault();
+    const name = addInput.trim();
+    if (!name) return;
+    setAddLoading(true);
+    try {
+      await api.addToCatalog(name);
+      const d = await api.getCatalog();
+      setCatalog(d.games || []);
+      setAddInput('');
+      showToast?.(`✅ "${name}" agregado al catálogo`);
+    } catch (err) {
+      showToast?.(`Error: ${err.message}`);
+    } finally {
+      setAddLoading(false);
+    }
+  }
+
+  async function handleRemoveFromCatalog(id, name) {
+    try {
+      await api.removeFromCatalog(id);
+      setCatalog(prev => prev.filter(g => g.id !== id));
+      showToast?.(`🗑 "${name}" eliminado del catálogo`);
+    } catch (err) {
+      showToast?.(`Error: ${err.message}`);
+    }
+  }
 
   // ── Bulk refresh ────────────────────────────────────────────────────────────
   function listenProgress(batchId) {
@@ -171,6 +211,9 @@ export default function BulkTab({ giftCardRate, showToast }) {
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-outline" onClick={() => setCatalogOpen(o => !o)}>
+            📋 Catálogo ({catalog.length})
+          </button>
           <button
             className="btn btn-secondary"
             onClick={handleLoadHistory}
@@ -188,6 +231,43 @@ export default function BulkTab({ giftCardRate, showToast }) {
           </button>
         </div>
       </div>
+
+      {/* ── Catalog panel ────────────────────────────────────────────────── */}
+      {catalogOpen && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ fontWeight: 600, marginBottom: 10, fontSize: 14 }}>
+            📋 Catálogo de juegos ({catalog.length})
+          </div>
+          <form onSubmit={handleAddToCatalog} style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <input
+              className="search-input"
+              type="text"
+              placeholder="Nombre del juego a agregar..."
+              value={addInput}
+              onChange={e => setAddInput(e.target.value)}
+              disabled={addLoading}
+              style={{ flex: 1 }}
+            />
+            <button className="btn btn-primary" type="submit" disabled={addLoading || !addInput.trim()}>
+              {addLoading ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : 'Agregar'}
+            </button>
+          </form>
+          <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {catalog.map(g => (
+              <div key={g.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px', borderRadius: 4, background: 'rgba(255,255,255,.03)' }}>
+                <span style={{ fontSize: 13 }}>{g.name}</span>
+                <button
+                  onClick={() => handleRemoveFromCatalog(g.id, g.name)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 16, padding: '0 4px', lineHeight: 1 }}
+                  title="Eliminar del catálogo"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Integrated search bar ─────────────────────────────────────────── */}
       <form className="search-wrap" onSubmit={handleSearch} style={{ marginBottom: 12 }}>

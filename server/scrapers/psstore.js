@@ -151,65 +151,51 @@ function baseTitle(name) {
 async function searchPsStore(query) {
   const encoded = encodeURIComponent(query);
 
-  // Run AR and US searches in parallel (getHtml handles proxy fallback internally)
-  const [arHtml, usHtml] = await Promise.all([
-    getHtml(`https://store.playstation.com/en-ar/search/${encoded}`).catch(() => null),
-    getHtml(`https://store.playstation.com/en-us/search/${encoded}`).catch(() => null),
-  ]);
-
-  const arResults = arHtml ? parseSearchResults(arHtml) : [];
+  // Fetch only US store
+  const usHtml = await getHtml(`https://store.playstation.com/en-us/search/${encoded}`).catch(() => null);
   const usResults = usHtml ? parseSearchResults(usHtml) : [];
 
   // Fuzzy-match — only consider actual game listings that have a price
-  const gameResults = arResults.filter(r => isGameListing(r.name) && r.priceUsd != null);
-  const searchPool  = gameResults.length ? gameResults : arResults.filter(r => r.priceUsd != null);
+  const gameResults = usResults.filter(r => isGameListing(r.name) && r.priceUsd != null);
+  const searchPool  = gameResults.length ? gameResults : usResults.filter(r => r.priceUsd != null);
   const fuse = new Fuse(searchPool, { keys: ['name'], threshold: 0.45, includeScore: true });
-  const arHits = fuse.search(query);
-  const ar = arHits.length ? arHits[0].item : (searchPool[0] || null);
+  const usHits = fuse.search(query);
+  const best = usHits.length ? usHits[0].item : (searchPool[0] || null);
 
-  // Collect all AR variants: any game listing whose base title matches the best hit
-  let arVariants = [];
-  if (ar) {
-    const base = baseTitle(ar.name);
-    // Use all game listings (including no-price) for variant grouping, but search only in priced ones
-    const allGameListings = arResults.filter(r => isGameListing(r.name));
-    arVariants = allGameListings.filter(r => baseTitle(r.name) === base);
+  // Collect all variants: any game listing whose base title matches the best hit
+  let variants = [];
+  if (best) {
+    const base = baseTitle(best.name);
+    const allGameListings = usResults.filter(r => isGameListing(r.name));
+    variants = allGameListings.filter(r => baseTitle(r.name) === base);
     // Fallback: include close fuse hits (score < 0.4) if base-title grouping found nothing extra
-    if (arVariants.length <= 1) {
-      const extras = arHits
+    if (variants.length <= 1) {
+      const extras = usHits
         .filter(h => h.score != null && h.score < 0.4 && h.item.priceUsd != null)
         .map(h => h.item);
-      arVariants = extras.length > 1 ? extras : arVariants;
-      if (!arVariants.find(v => v.name === ar.name)) arVariants.unshift(ar);
+      variants = extras.length > 1 ? extras : variants;
+      if (!variants.find(v => v.name === best.name)) variants.unshift(best);
     }
     // Sort cheapest first
-    arVariants.sort((a, b) => (a.priceUsd ?? Infinity) - (b.priceUsd ?? Infinity));
+    variants.sort((a, b) => (a.priceUsd ?? Infinity) - (b.priceUsd ?? Infinity));
   }
 
-  // Fuzzy-match US results to the same title
-  let us = null;
-  if (ar && usResults.length) {
-    const fuseUs = new Fuse(usResults, { keys: ['name'], threshold: 0.45 });
-    const usHits = fuseUs.search(ar.name);
-    us = usHits.length ? usHits[0].item : null;
-  }
-
-  return { ar, us, arVariants };
+  return { best, variants };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Public: search for a single game (used by search route)
 // ─────────────────────────────────────────────────────────────────────────────
-async function searchPsStoreAR(query) {
+async function searchPsStoreUS(query) {
   try {
-    const { ar, us, arVariants } = await searchPsStore(query);
-    if (!ar) return { found: false, query };
+    const { best, variants } = await searchPsStore(query);
+    if (!best) return { found: false, query };
 
     // The "best" result to show as the primary is the cheapest variant
-    const cheapest = arVariants.length ? arVariants[0] : ar;
+    const cheapest = variants.length ? variants[0] : best;
 
     if (cheapest.priceUsd) {
-      recordPrice(cheapest.name, 'psstore-ar', cheapest.priceUsd, {
+      recordPrice(cheapest.name, 'psstore-us', cheapest.priceUsd, {
         raw: cheapest.priceRaw, currency: 'USD', discount: cheapest.discountPct,
       });
     }
@@ -223,11 +209,11 @@ async function searchPsStoreAR(query) {
       originalPriceUsd: cheapest.originalPriceUsd,
       saleEnd:          cheapest.saleEnd,
       detailUrl:        cheapest.detailUrl,
-      usPriceUsd:       us?.priceUsd || null,
+      usPriceUsd:       cheapest.priceUsd || null,
       history:          [],
       saleDates:        [],
       lowestUsd:        null,
-      variants:         arVariants.map(v => ({
+      variants:         variants.map(v => ({
         title:            v.name,
         priceUsd:         v.priceUsd,
         priceRaw:         v.priceRaw,
@@ -243,6 +229,9 @@ async function searchPsStoreAR(query) {
   }
 }
 
+// Backward-compat alias for cronService
+const searchPsStoreAR = searchPsStoreUS;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Public: bulk lookup — given a list of Turkey game titles, find each on
 //  PS Store AR + US, with concurrency control (max 6 parallel requests)
@@ -257,10 +246,10 @@ async function bulkLookup(titles, onProgress) {
   async function worker(idx) {
     const title = titles[idx];
     try {
-      const { ar, us } = await searchPsStore(title);
-      results[idx] = { title, ar, us };
+      const { best, variants } = await searchPsStore(title);
+      results[idx] = { title, best, variants };
     } catch (err) {
-      results[idx] = { title, ar: null, us: null, error: err.message };
+      results[idx] = { title, best: null, variants: [], error: err.message };
     }
     completed++;
     if (onProgress) onProgress({ completed, total: titles.length, current: title });
@@ -282,4 +271,4 @@ async function bulkLookup(titles, onProgress) {
   return results;
 }
 
-module.exports = { searchPsStoreAR, bulkLookup };
+module.exports = { searchPsStoreUS, searchPsStoreAR, bulkLookup };

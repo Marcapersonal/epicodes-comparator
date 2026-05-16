@@ -30,7 +30,7 @@ export function getVerdict(realCostUsd, turkeyPriceUsd, { minHistoricalUsd, gift
   }
 
   if (!hasAr) {
-    return { type: 'BUY_TURKEY', label: '🇹🇷 COMPRÁ EN TURQUÍA', sublabel: 'Sin precio en PS Store AR', color: 'red', saving: 0 };
+    return { type: 'BUY_TURKEY', label: '🇹🇷 COMPRÁ EN TURQUÍA', sublabel: 'Sin precio en PS Store US', color: 'red', saving: 0 };
   }
 
   const diff    = Math.abs(realCostUsd - turkeyPriceUsd);

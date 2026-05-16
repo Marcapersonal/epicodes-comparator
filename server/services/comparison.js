@@ -43,7 +43,7 @@ function getVerdict(realCostUsd, turkeyPriceUsd, { minHistoricalUsd, giftCardRat
     return {
       type:    'BUY_TURKEY',
       label:   '🇹🇷 COMPRÁ EN TURQUÍA',
-      sublabel: 'Sin precio en PS Store AR',
+      sublabel: 'Sin precio en PS Store US',
       color:   'red',
       saving:  0,
     };

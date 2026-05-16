@@ -51,7 +51,7 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
       {psStore?.found && psStore.variants?.length > 1 && (
         <div style={{ marginBottom: 14 }}>
           <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-            Ediciones disponibles — PS Store AR
+            Ediciones disponibles — PS Store US
           </div>
           {psStore.variants.map((v, i) => {
             const vCost = calcRealCost(v.priceUsd, giftCardRate);
@@ -94,7 +94,7 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
         <tbody>
           <tr>
             <td>
-              {psStore?.variants?.length > 1 ? 'Más barata en PS Store AR' : 'Precio PS Store AR'}
+              {psStore?.variants?.length > 1 ? 'Más barata en PS Store US' : 'Precio PS Store US'}
             </td>
             <td className={psStore?.priceUsd ? '' : 'price-red'}>
               {psStore?.found ? (
@@ -127,7 +127,7 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
             </td>
           </tr>
           <tr>
-            <td>Mínimo histórico PS Store AR</td>
+            <td>Mínimo histórico PS Store US</td>
             <td>{fmt(comparison?.minHistoricalUsd)}</td>
           </tr>
           <tr>

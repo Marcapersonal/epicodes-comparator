@@ -5,7 +5,7 @@ const Fuse = require('fuse.js');
 const { bulkLookup }        = require('../scrapers/psstore');
 const { scrapeAllProducts } = require('../scrapers/gamesturkey');
 const { getVerdict }        = require('../services/comparison');
-const { getDb, getGiftCardRate, getMinHistoricalPrice } = require('../db/database');
+const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog } = require('../db/database');
 // Lazy-loaded to prevent playwright-extra/stealth from patching Node internals at startup
 let _historyRoute = null;
 function getHistoryRoute() { return _historyRoute || (_historyRoute = require('./history')); }
@@ -99,87 +99,88 @@ async function runBulkScrape(batchId) {
   const emit = (data) => { Object.assign(activeBatch, data); broadcastProgress(batchId, activeBatch); };
   const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
 
-  // STEP 1 — Scrape GamesturkeyACC catalog
-  emit({ message: '🇹🇷 Scrapeando catálogo de GamesturkeyACC...', progress: 5 });
+  // STEP 1 — Load user's catalog from DB
+  emit({ message: '📋 Cargando catálogo de juegos...', progress: 5 });
+  const catalog = getCatalog();
+  if (!catalog.length) {
+    activeBatch = { id: batchId, status: 'error', message: '❌ El catálogo está vacío. Agregá juegos desde el panel de catálogo.' };
+    broadcastProgress(batchId, activeBatch);
+    return;
+  }
+
+  // STEP 2 — Scrape GamesturkeyACC for Turkey prices
+  emit({ message: '🇹🇷 Scrapeando precios de GamesturkeyACC...', progress: 8 });
   let turkeyProducts = [];
   try {
-    turkeyProducts = await scrapeAllProducts(undefined, (prog) => {  // undefined = use default (all 1-30)
-      emit({ message: `GamesturkeyACC — ${prog.total} productos`, progress: 5 + Math.min(prog.total / 3, 15) });
+    turkeyProducts = await scrapeAllProducts(undefined, (prog) => {
+      emit({ message: `GamesturkeyACC — ${prog.total} productos`, progress: 8 + Math.min(prog.total / 3, 12) });
     });
   } catch (err) {
     console.error('GamesturkeyACC error:', err.message);
     emit({ message: `⚠️ GamesturkeyACC falló: ${err.message}`, progress: 20 });
   }
 
-  if (!turkeyProducts.length) {
-    activeBatch = { id: batchId, status: 'error', message: '❌ No se pudieron obtener productos de GamesturkeyACC' };
-    broadcastProgress(batchId, activeBatch);
-    return;
-  }
+  // STEP 3 — Build Turkey Fuse index
+  const fuseT = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.45 });
 
-  emit({ message: `✅ ${turkeyProducts.length} productos de Turkey. Buscando precios en PS Store AR + US...`, progress: 20 });
+  emit({ message: `✅ ${turkeyProducts.length} productos de Turkey. Buscando en PS Store US (${catalog.length} juegos)...`, progress: 20 });
 
-  // STEP 2 — Lookup each Turkey game on PS Store AR and US in parallel
-  // Strip platform/region suffixes that Turkey adds but PS Store doesn't have
-  function cleanForSearch(title) {
-    return title
-      .replace(/\s*PS[45]™?(\s*[-–]\s*PS[45]™?)?\s*/gi, ' ')
-      .replace(/\s*\((?:tr|india|ps[45])\)\s*/gi, ' ')
-      .replace(/\s*(digital\s+deluxe|standard\s+edition|deluxe\s+edition|complete\s+edition|gold\s+edition)\s*$/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  const titles       = turkeyProducts.map(p => p.title);
-  const searchTitles = titles.map(cleanForSearch);
-
-  const psResults = await bulkLookup(searchTitles, (prog) => {
+  // STEP 4 — Lookup each catalog game on PS Store US
+  const psResults = await bulkLookup(catalog.map(g => g.name), (prog) => {
     const pct = 20 + Math.round((prog.completed / prog.total) * 65);
-    emit({ message: `PS Store — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
+    emit({ message: `PS Store US — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
   });
 
   emit({ message: '💾 Cruzando datos y guardando...', progress: 87 });
 
-  // STEP 3 — Cross-match and compute verdicts
+  // STEP 5 — Cross-match and compute verdicts
   const giftCardRate = getGiftCardRate();
   const db  = getDb();
   const now = new Date().toISOString();
-
-  // Build Turkey lookup map
-  const turkeyMap = new Map(turkeyProducts.map(p => [p.title, p]));
 
   const insertBulk = db.prepare(`
     INSERT INTO bulk_results
       (batch_id, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
        turkey_price, turkey_url, real_cost_usd, min_hist_usd,
-       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url, editions_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const rows = [];
 
-  for (let i = 0; i < titles.length; i++) {
-    const turkey = turkeyMap.get(titles[i]);
-    const ps     = psResults[i];
-    const ar     = ps?.ar || null;
-    const us     = ps?.us || null;
+  for (let i = 0; i < catalog.length; i++) {
+    const game    = catalog[i];
+    const ps      = psResults[i];
+    const variants = ps?.variants || [];
+    const cheapest = variants.length ? variants[0] : (ps?.best || null);
 
-    const arPriceUsd = ar?.priceUsd ?? null;
-    const realCost   = arPriceUsd != null ? Math.round(arPriceUsd * giftCardRate * 100) / 100 : null;
-    const minHist    = getMinHistoricalPrice(titles[i]);
+    const usPriceUsd = cheapest?.priceUsd ?? null;
+    const realCost   = usPriceUsd != null ? Math.round(usPriceUsd * giftCardRate * 100) / 100 : null;
+    const minHist    = getMinHistoricalPrice(game.name);
+
+    // Find Turkey price via fuzzy match
+    const tHits  = fuseT.search(game.name);
+    const turkey = tHits.length ? tHits[0].item : null;
 
     const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
       minHistoricalUsd: minHist,
       giftCardRate,
     });
 
+    const editionsJson = JSON.stringify(variants.map(v => ({
+      title:     v.name || v.title,
+      priceUsd:  v.priceUsd,
+      discount:  v.discountPct || v.discount || 0,
+      detailUrl: v.detailUrl,
+    })));
+
     rows.push([
       b(batchId),
-      b(turkey?.title || titles[i]),
-      b(arPriceUsd),
-      b(ar?.priceRaw) ?? null,
-      b(ar?.discountPct) ?? 0,
-      b(ar?.saleEnd) ?? null,
+      b(game.name),
+      b(usPriceUsd),
+      b(cheapest?.priceRaw) ?? null,
+      b(cheapest?.discountPct) ?? 0,
+      b(cheapest?.saleEnd) ?? null,
       b(turkey?.priceUsd) ?? null,
       b(turkey?.url) ?? null,
       b(realCost),
@@ -189,8 +190,9 @@ async function runBulkScrape(batchId) {
       b(verdict.saving) ?? 0,
       b(giftCardRate),
       b(now),
-      b(us?.priceUsd) ?? null,
-      b(ar?.detailUrl) ?? null,
+      b(usPriceUsd),        // us_price_usd — same as ps_price_usd (now US only)
+      b(cheapest?.detailUrl) ?? null,
+      b(editionsJson),
     ]);
   }
 
@@ -203,10 +205,10 @@ async function runBulkScrape(batchId) {
     throw e;
   }
 
-  const withAr = rows.filter(r => r[2] != null).length;
+  const withPrice = rows.filter(r => r[2] != null).length;
   activeBatch = {
     id: batchId, status: 'done', progress: 100,
-    message: `✅ Completado — ${rows.length} juegos | ${withAr} con precio AR | ${rows.length - withAr} solo Turkey`,
+    message: `✅ Completado — ${rows.length} juegos del catálogo | ${withPrice} con precio PS Store US | ${rows.length - withPrice} sin precio`,
   };
   broadcastProgress(batchId, activeBatch);
   setTimeout(() => progressClients.delete(batchId), 60000);

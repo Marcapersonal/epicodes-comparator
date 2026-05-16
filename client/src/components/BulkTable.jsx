@@ -54,8 +54,7 @@ export default function BulkTable({ rows, giftCardRate }) {
         <thead>
           <tr>
             {th('game_name',    'Juego')}
-            {th('ps_price_usd', 'PS Store AR')}
-            {th('us_price_usd', 'PS Store US')}
+            {th('ps_price_usd', 'PS Store US')}
             {th('_realCost',    'Tu costo real')}
             {th('turkey_price', 'Turquía')}
             {th('_saving',      'Ahorro')}
@@ -66,6 +65,13 @@ export default function BulkTable({ rows, giftCardRate }) {
           {sorted.map((r, i) => {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
             const isOpen = expanded === i;
+
+            // Parse editions_json if present
+            let editions = [];
+            if (r.editions_json) {
+              try { editions = JSON.parse(r.editions_json); } catch (_) {}
+            }
+
             return (
               <>
                 <tr key={r.id || i} onClick={() => setExpanded(isOpen ? null : i)} style={{ cursor: 'pointer' }}>
@@ -77,11 +83,6 @@ export default function BulkTable({ rows, giftCardRate }) {
                       ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{fmt(r.ps_price_usd)}</a>
                       : fmt(r.ps_price_usd)}
                     {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 4 }}>-{r.ps_discount_pct}%</span>}
-                  </td>
-                  <td style={{ color: 'var(--muted)', fontSize: 13 }}>
-                    {r.us_price_usd != null
-                      ? <a href={`https://store.playstation.com/en-us/search/${encodeURIComponent(r.game_name)}`} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'var(--muted)' }}>{fmt(r.us_price_usd)}</a>
-                      : <span style={{ color: 'var(--dim)' }}>—</span>}
                   </td>
                   <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
                   <td>
@@ -98,7 +99,7 @@ export default function BulkTable({ rows, giftCardRate }) {
                 </tr>
                 {isOpen && (
                   <tr key={`${i}-detail`}>
-                    <td colSpan="7" style={{ background: 'var(--surface)', padding: '12px 16px' }}>
+                    <td colSpan="6" style={{ background: 'var(--surface)', padding: '12px 16px' }}>
                       <div style={{ fontSize: 13, color: 'var(--muted)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
                         <div>Mínimo histórico: <b style={{ color: 'var(--text)' }}>{fmt(r.min_hist_usd)}</b></div>
                         <div>Costo al mínimo: <b style={{ color: 'var(--primary-h)' }}>{calcRealCost(r.min_hist_usd, giftCardRate) ? fmt(calcRealCost(r.min_hist_usd, giftCardRate)) : '—'}</b></div>
@@ -106,6 +107,49 @@ export default function BulkTable({ rows, giftCardRate }) {
                         <div>Tasa usada: <b style={{ color: 'var(--text)' }}>{giftCardRate.toFixed(2)}</b></div>
                         <div style={{ gridColumn: '1/-1', marginTop: 4 }}><i>{r._verdict.sublabel || ''}</i></div>
                       </div>
+
+                      {editions.length > 1 && (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+                            Ediciones disponibles — PS Store US
+                          </div>
+                          {editions.map((ed, ei) => {
+                            const edCost = calcRealCost(ed.priceUsd, giftCardRate);
+                            const isCheapest = ei === 0;
+                            return (
+                              <div
+                                key={ed.title || ei}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 8,
+                                  padding: '5px 10px', marginBottom: 4, borderRadius: 6,
+                                  background: isCheapest ? 'rgba(0,200,83,.08)' : 'rgba(255,255,255,.03)',
+                                  border: isCheapest ? '1px solid rgba(0,200,83,.25)' : '1px solid rgba(255,255,255,.06)',
+                                }}
+                              >
+                                <div style={{ flex: 1, fontSize: 12, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
+                                  {isCheapest && <span style={{ fontSize: 10, marginRight: 5 }}>★</span>}
+                                  {ed.detailUrl
+                                    ? <a href={ed.detailUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'none' }}>{ed.title}</a>
+                                    : ed.title}
+                                </div>
+                                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                                  <span style={{ fontWeight: 700, fontSize: 13, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
+                                    {fmt(ed.priceUsd)}
+                                  </span>
+                                  {ed.discount > 0 && (
+                                    <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 5 }}>-{ed.discount}%</span>
+                                  )}
+                                  {edCost != null && (
+                                    <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 6 }}>
+                                      → {fmt(edCost)} real
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )}
