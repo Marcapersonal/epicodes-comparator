@@ -101,7 +101,7 @@ async function runBulkScrape(batchId) {
   emit({ message: '🇹🇷 Scrapeando catálogo de GamesturkeyACC...', progress: 5 });
   let turkeyProducts = [];
   try {
-    turkeyProducts = await scrapeAllProducts([1, 12, 13, 21], (prog) => {
+    turkeyProducts = await scrapeAllProducts(undefined, (prog) => {  // undefined = use default (all 1-30)
       emit({ message: `GamesturkeyACC — ${prog.total} productos`, progress: 5 + Math.min(prog.total / 3, 15) });
     });
   } catch (err) {
@@ -118,8 +118,20 @@ async function runBulkScrape(batchId) {
   emit({ message: `✅ ${turkeyProducts.length} productos de Turkey. Buscando precios en PS Store AR + US...`, progress: 20 });
 
   // STEP 2 — Lookup each Turkey game on PS Store AR and US in parallel
-  const titles = turkeyProducts.map(p => p.title);
-  const psResults = await bulkLookup(titles, (prog) => {
+  // Strip platform/region suffixes that Turkey adds but PS Store doesn't have
+  function cleanForSearch(title) {
+    return title
+      .replace(/\s*PS[45]™?(\s*[-–]\s*PS[45]™?)?\s*/gi, ' ')
+      .replace(/\s*\((?:tr|india|ps[45])\)\s*/gi, ' ')
+      .replace(/\s*(digital\s+deluxe|standard\s+edition|deluxe\s+edition|complete\s+edition|gold\s+edition)\s*$/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  const titles       = turkeyProducts.map(p => p.title);
+  const searchTitles = titles.map(cleanForSearch);
+
+  const psResults = await bulkLookup(searchTitles, (prog) => {
     const pct = 20 + Math.round((prog.completed / prog.total) * 65);
     emit({ message: `PS Store — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
   });
