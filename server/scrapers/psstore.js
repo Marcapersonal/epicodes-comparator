@@ -116,8 +116,38 @@ function parseSearchResults(html) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Search a single game — returns best fuzzy match + US price
+//  Search a single game — returns best fuzzy match + all variants + US price
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Returns true for actual game listings (not DLC, points packs, etc.)
+function isGameListing(name) {
+  return !/-\s*[\d,]+(,\d{3})*\s*(fc|vc|gold|coins?|points?)\b/i.test(name) &&
+         !/\bpoints?\s*$/i.test(name) &&
+         !/\b(bundle|dlc|season\s+pass|add-?on)\b/i.test(name) &&
+         name.trim() !== '';
+}
+
+// Strip edition/platform suffixes to get a base title for grouping variants
+function baseTitle(name) {
+  return name
+    // Remove "- 100 FC Points" style DLC suffixes
+    .replace(/\s*[-–]\s*[\d,]+\s*(fc|vc|points?|coins?|gold|credits?).*$/i, '')
+    // Remove platform suffix: "para PS4 y PS5" / "for PS4 & PS5"
+    .replace(/\s*(para|for)\s+ps[45]\s*(y|and|&)?\s*ps[45].*/i, '')
+    // Remove trailing "PS4" / "PS5" / "PS4™" / "PS4/PS5"
+    .replace(/\s+ps[45](™|\s*\/\s*ps[45])?(\s*™)?\s*$/i, '')
+    // Remove Spanish edition: "Edición Estándar / Ultimate / Deluxe..."
+    .replace(/\s+(edici[oó]n)\s+\S+.*/i, '')
+    // Remove English edition suffixes with optional dash/colon prefix
+    .replace(/\s*[-–:]\s*(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?)\s*(edition|ed\.?)?\s*$/i, '')
+    .replace(/\s+(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?)\s*(edition|ed\.?)?\s*$/i, '')
+    // Remove ™ / ® symbols and clean up
+    .replace(/[™®]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 async function searchPsStore(query) {
   const encoded = encodeURIComponent(query);
 
@@ -130,10 +160,31 @@ async function searchPsStore(query) {
   const arResults = arHtml ? parseSearchResults(arHtml) : [];
   const usResults = usHtml ? parseSearchResults(usHtml) : [];
 
-  // Fuzzy-match against query to find best AR result
-  const fuse = new Fuse(arResults, { keys: ['name'], threshold: 0.45 });
+  // Fuzzy-match — only consider actual game listings that have a price
+  const gameResults = arResults.filter(r => isGameListing(r.name) && r.priceUsd != null);
+  const searchPool  = gameResults.length ? gameResults : arResults.filter(r => r.priceUsd != null);
+  const fuse = new Fuse(searchPool, { keys: ['name'], threshold: 0.45, includeScore: true });
   const arHits = fuse.search(query);
-  const ar = arHits.length ? arHits[0].item : (arResults[0] || null);
+  const ar = arHits.length ? arHits[0].item : (searchPool[0] || null);
+
+  // Collect all AR variants: any game listing whose base title matches the best hit
+  let arVariants = [];
+  if (ar) {
+    const base = baseTitle(ar.name);
+    // Use all game listings (including no-price) for variant grouping, but search only in priced ones
+    const allGameListings = arResults.filter(r => isGameListing(r.name));
+    arVariants = allGameListings.filter(r => baseTitle(r.name) === base);
+    // Fallback: include close fuse hits (score < 0.4) if base-title grouping found nothing extra
+    if (arVariants.length <= 1) {
+      const extras = arHits
+        .filter(h => h.score != null && h.score < 0.4 && h.item.priceUsd != null)
+        .map(h => h.item);
+      arVariants = extras.length > 1 ? extras : arVariants;
+      if (!arVariants.find(v => v.name === ar.name)) arVariants.unshift(ar);
+    }
+    // Sort cheapest first
+    arVariants.sort((a, b) => (a.priceUsd ?? Infinity) - (b.priceUsd ?? Infinity));
+  }
 
   // Fuzzy-match US results to the same title
   let us = null;
@@ -143,7 +194,7 @@ async function searchPsStore(query) {
     us = usHits.length ? usHits[0].item : null;
   }
 
-  return { ar, us };
+  return { ar, us, arVariants };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,28 +202,40 @@ async function searchPsStore(query) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchPsStoreAR(query) {
   try {
-    const { ar, us } = await searchPsStore(query);
+    const { ar, us, arVariants } = await searchPsStore(query);
     if (!ar) return { found: false, query };
 
-    if (ar.priceUsd) {
-      recordPrice(ar.name, 'psstore-ar', ar.priceUsd, {
-        raw: ar.priceRaw, currency: 'USD', discount: ar.discountPct,
+    // The "best" result to show as the primary is the cheapest variant
+    const cheapest = arVariants.length ? arVariants[0] : ar;
+
+    if (cheapest.priceUsd) {
+      recordPrice(cheapest.name, 'psstore-ar', cheapest.priceUsd, {
+        raw: cheapest.priceRaw, currency: 'USD', discount: cheapest.discountPct,
       });
     }
 
     return {
       found:            true,
-      title:            ar.name,
-      priceUsd:         ar.priceUsd,
-      priceRaw:         ar.priceRaw,
-      discount:         ar.discountPct,
-      originalPriceUsd: ar.originalPriceUsd,
-      saleEnd:          ar.saleEnd,
-      detailUrl:        ar.detailUrl,
+      title:            cheapest.name,
+      priceUsd:         cheapest.priceUsd,
+      priceRaw:         cheapest.priceRaw,
+      discount:         cheapest.discountPct,
+      originalPriceUsd: cheapest.originalPriceUsd,
+      saleEnd:          cheapest.saleEnd,
+      detailUrl:        cheapest.detailUrl,
       usPriceUsd:       us?.priceUsd || null,
       history:          [],
       saleDates:        [],
       lowestUsd:        null,
+      variants:         arVariants.map(v => ({
+        title:            v.name,
+        priceUsd:         v.priceUsd,
+        priceRaw:         v.priceRaw,
+        discount:         v.discountPct,
+        originalPriceUsd: v.originalPriceUsd,
+        saleEnd:          v.saleEnd,
+        detailUrl:        v.detailUrl,
+      })),
     };
   } catch (err) {
     console.error('PS Store search error:', err.message);

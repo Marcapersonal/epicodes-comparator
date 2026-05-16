@@ -53,6 +53,7 @@ router.get('/', async (req, res) => {
         saleEnd:          ps.saleEnd,
         detailUrl:        ps.detailUrl,
         usPriceUsd:       ps.usPriceUsd || null,
+        variants:         ps.variants || [],
         error:            ps.error,
       },
       turkey: {

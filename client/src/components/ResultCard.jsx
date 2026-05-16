@@ -47,10 +47,55 @@ export default function ResultCard({ result, giftCardRate, showToast, onTrack })
 
       <VerdictBadge verdict={verdict} />
 
+      {/* ── Multiple editions ──────────────────────────────────────────── */}
+      {psStore?.found && psStore.variants?.length > 1 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+            Ediciones disponibles — PS Store AR
+          </div>
+          {psStore.variants.map((v, i) => {
+            const vCost = calcRealCost(v.priceUsd, giftCardRate);
+            const isCheapest = i === 0;
+            return (
+              <div
+                key={v.title}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 10px', marginBottom: 4, borderRadius: 6,
+                  background: isCheapest ? 'rgba(0,200,83,.08)' : 'rgba(255,255,255,.03)',
+                  border: isCheapest ? '1px solid rgba(0,200,83,.25)' : '1px solid rgba(255,255,255,.06)',
+                }}
+              >
+                <div style={{ flex: 1, fontSize: 13, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
+                  {isCheapest && <span style={{ fontSize: 10, marginRight: 5 }}>★</span>}
+                  <a href={v.detailUrl} target="_blank" rel="noreferrer"
+                    style={{ color: 'inherit', textDecoration: 'none' }}>
+                    {v.title}
+                  </a>
+                </div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
+                    {fmt(v.priceUsd)}
+                  </span>
+                  {v.discount > 0 && (
+                    <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 5 }}>-{v.discount}%</span>
+                  )}
+                  <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 6 }}>
+                    → {fmt(vCost)} real
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <table className="price-table">
         <tbody>
           <tr>
-            <td>Precio PS Store AR</td>
+            <td>
+              {psStore?.variants?.length > 1 ? 'Más barata en PS Store AR' : 'Precio PS Store AR'}
+            </td>
             <td className={psStore?.priceUsd ? '' : 'price-red'}>
               {psStore?.found ? (
                 <>
