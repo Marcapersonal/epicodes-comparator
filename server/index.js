@@ -31,6 +31,34 @@ app.use('/api/history',   historyRoutes);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
+// Temporary debug: test PS Store raw response from Railway IP
+app.get('/api/debug/psstore', async (req, res) => {
+  const axios = require('axios');
+  const cheerio = require('cheerio');
+  const q = req.query.q || 'Spider-Man 2';
+  const url = `https://store.playstation.com/en-ar/search/${encodeURIComponent(q)}`;
+  try {
+    const { data, status, headers } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Referer': 'https://www.google.com/',
+      },
+      timeout: 15000,
+    });
+    const $ = cheerio.load(data);
+    const tiles = $('[data-qa^="search#productTile"]').length;
+    const firstName = $('[data-qa^="search#productTile"]').first().find('[data-qa$="#product-name"]').text().trim();
+    const firstPrice = $('[data-qa^="search#productTile"]').first().find('[data-qa$="#price#display-price"]').first().text().trim();
+    res.json({ status, htmlLen: data.length, tiles, firstName, firstPrice, url,
+      snippet: data.substring(0, 500) });
+  } catch (err) {
+    res.json({ error: err.message, status: err.response?.status, url });
+  }
+});
+
 // ── Serve React client ────────────────────────────────────────────────────────
 const CLIENT_DIST = path.join(__dirname, '../client/dist');
 app.use(express.static(CLIENT_DIST));
