@@ -28,18 +28,21 @@ function getHeaders() {
 const PROXY_BASE = 'https://api.allorigins.win/get?url=';
 
 async function getHtml(url) {
-  // Try direct first; fall back to allorigins proxy if blocked (cloud IP detection)
   try {
     const { data } = await axios.get(url, { headers: getHeaders(), timeout: 20000 });
-    // Detect empty/challenge responses
-    if (typeof data === 'string' && data.length > 10000) return data;
-    throw new Error('Response too short — likely blocked');
-  } catch (_) {
-    const { data } = await axios.get(
-      `${PROXY_BASE}${encodeURIComponent(url)}`,
-      { headers: { 'User-Agent': USER_AGENTS[0] }, timeout: 25000 }
-    );
-    return data?.contents || '';
+    return typeof data === 'string' ? data : '';
+  } catch (err) {
+    // Only use proxy on network/HTTP errors, not on successful-but-empty responses
+    if (!err.response || err.response.status >= 500) {
+      try {
+        const { data } = await axios.get(
+          `${PROXY_BASE}${encodeURIComponent(url)}`,
+          { headers: { 'User-Agent': USER_AGENTS[0] }, timeout: 25000 }
+        );
+        return data?.contents || '';
+      } catch (_) {}
+    }
+    return '';
   }
 }
 
