@@ -4,15 +4,16 @@ const cors     = require('cors');
 const path     = require('path');
 const { getDb } = require('./db/database');
 
-const searchRoutes   = require('./routes/search');
-const bulkRoutes     = require('./routes/bulk');
-const watchlistRoutes = require('./routes/watchlist');
-const settingsRoutes = require('./routes/settings');
-const alertsRoutes   = require('./routes/alerts');
-const historyRoutes  = require('./routes/history');
-const catalogRoutes   = require('./routes/catalog');
-const gameinfoRoutes  = require('./routes/gameinfo');
-const { startCron }  = require('./services/cronService');
+const searchRoutes      = require('./routes/search');
+const bulkRoutes        = require('./routes/bulk');
+const watchlistRoutes   = require('./routes/watchlist');
+const settingsRoutes    = require('./routes/settings');
+const alertsRoutes      = require('./routes/alerts');
+const historyRoutes     = require('./routes/history');
+const catalogRoutes     = require('./routes/catalog');
+const gameinfoRoutes    = require('./routes/gameinfo');
+const platpricesRoutes  = require('./routes/platprices');
+const { startCron }     = require('./services/cronService');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -24,14 +25,15 @@ app.use(express.json());
 getDb();
 
 // ── API routes ────────────────────────────────────────────────────────────────
-app.use('/api/search',    searchRoutes);
-app.use('/api/bulk',      bulkRoutes);
-app.use('/api/watchlist', watchlistRoutes);
-app.use('/api/settings',  settingsRoutes);
-app.use('/api/alerts',    alertsRoutes);
-app.use('/api/history',   historyRoutes);
-app.use('/api/catalog',   catalogRoutes);
-app.use('/api/game-info', gameinfoRoutes);
+app.use('/api/search',      searchRoutes);
+app.use('/api/bulk',        bulkRoutes);
+app.use('/api/watchlist',   watchlistRoutes);
+app.use('/api/settings',    settingsRoutes);
+app.use('/api/alerts',      alertsRoutes);
+app.use('/api/history',     historyRoutes);
+app.use('/api/catalog',     catalogRoutes);
+app.use('/api/game-info',   gameinfoRoutes);
+app.use('/api/platprices',  platpricesRoutes);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 

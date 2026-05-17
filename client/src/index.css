@@ -157,16 +157,17 @@ a:hover { text-decoration: underline; }
   display: inline-block; border-radius: 5px; padding: 2px 7px; font-size: 11px; font-weight: 700;
   white-space: nowrap;
 }
-/* Column widths — fixed layout, Juego gets ~30% of 1080px ≈ 320px */
-.bulk-table col.col-name    { width: 30%; }
+/* Column widths — fixed layout, 10 columns, Juego gets ~25% ≈ 270px */
+.bulk-table col.col-name    { width: 25%; }
 .bulk-table col.col-ps      { width: 8%; }
 .bulk-table col.col-real    { width: 8%; }
-.bulk-table col.col-turkey  { width: 8%; }
-.bulk-table col.col-saving  { width: 8%; }
-.bulk-table col.col-verdict { width: 14%; }
+.bulk-table col.col-turkey  { width: 7%; }
+.bulk-table col.col-saving  { width: 7%; }
+.bulk-table col.col-verdict { width: 12%; }
 .bulk-table col.col-min     { width: 8%; }
-.bulk-table col.col-sale    { width: 9%; }
-.bulk-table col.col-lang    { width: 7%; }
+.bulk-table col.col-sale    { width: 8%; }
+.bulk-table col.col-lang    { width: 5%; }
+.bulk-table col.col-hist    { width: 7%; } /* días sin oferta (PlatPrices) */
 .chip-green  { background: rgba(0,230,118,.15); color: var(--green); }
 .chip-red    { background: rgba(255,82,82,.15);  color: var(--red);  }
 .chip-yellow { background: rgba(255,215,64,.15); color: var(--yellow);}

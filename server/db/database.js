@@ -100,10 +100,23 @@ function _migrate(db) {
       checked_at    TEXT    NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_bulk_batch  ON bulk_results(batch_id);
-    CREATE INDEX IF NOT EXISTS idx_ph_game     ON price_history(game_name);
-    CREATE INDEX IF NOT EXISTS idx_pshd_game   ON ps_price_history_detail(game_name);
+    CREATE TABLE IF NOT EXISTS platprices_cache (
+      game_name        TEXT PRIMARY KEY,
+      ppid             TEXT,
+      base_price_usd   REAL,
+      sale_price_usd   REAL,
+      last_discounted  TEXT,
+      discount_until   TEXT,
+      discount_pct     INTEGER,
+      raw_json         TEXT,
+      fetched_at       TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bulk_batch     ON bulk_results(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_ph_game        ON price_history(game_name);
+    CREATE INDEX IF NOT EXISTS idx_pshd_game      ON ps_price_history_detail(game_name);
     CREATE INDEX IF NOT EXISTS idx_catalog_active ON catalog(active);
+    CREATE INDEX IF NOT EXISTS idx_pp_fetched     ON platprices_cache(fetched_at);
   `);
 
   // Add new columns if they don't exist yet (safe to run on existing DBs)

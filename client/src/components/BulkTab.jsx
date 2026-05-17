@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'; // eslint-disable-line no-unused-vars
-import { api, createProgressStream } from '../api.js';
+import { api, createProgressStream, createPlatPricesStream } from '../api.js';
 import BulkTable  from './BulkTable.jsx';
 import ResultCard from './ResultCard.jsx';
 
@@ -43,6 +43,12 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
   // ── History stats (loaded once on mount, no job needed) ─────────────────────
   const [histStats, setHistStats] = useState(null);
 
+  // ── PlatPrices seed state ───────────────────────────────────────────────────
+  const [ppStatus,        setPpStatus]        = useState(null);  // { active, stats, keyConfigured }
+  const [ppSeeding,       setPpSeeding]       = useState(false);
+  const [ppProgress,      setPpProgress]      = useState(null);
+  const closePpStream     = useRef(null);
+
   // ── Integrated search state ─────────────────────────────────────────────────
   const [searchInput,   setSearchInput]   = useState('');
   const [searchQuery,   setSearchQuery]   = useState('');   // committed query
@@ -68,7 +74,7 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
 
   useEffect(() => { load(); }, [filter, minSaving]); // eslint-disable-line
 
-  // On mount: load history stats (data is always persistent in DB)
+  // On mount: load history stats
   useEffect(() => {
     api.getHistoryStatus().then(({ stats }) => {
       if (stats) setHistStats(stats);
@@ -78,6 +84,18 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
   // On mount: load catalog
   useEffect(() => {
     api.getCatalog().then(d => setCatalog(d.games || [])).catch(() => {});
+  }, []); // eslint-disable-line
+
+  // On mount: load PlatPrices status
+  useEffect(() => {
+    api.getPlatPricesStatus().then(s => {
+      setPpStatus(s);
+      if (s.active?.status === 'running') {
+        setPpSeeding(true);
+        // reconnect to the running seed job's stream — we don't have jobId
+        // so just poll status every 5s until done
+      }
+    }).catch(() => {});
   }, []); // eslint-disable-line
 
   // ── Catalog handlers ────────────────────────────────────────────────────────
@@ -132,6 +150,31 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
       listenProgress(batchId);
     } catch (e) {
       setRunning(false);
+      showToast?.(`Error: ${e.message}`);
+    }
+  }
+
+  // ── PlatPrices seed ─────────────────────────────────────────────────────────
+  async function handlePpSeed() {
+    if (ppSeeding) return;
+    setPpSeeding(true);
+    setPpProgress({ message: 'Iniciando...', progress: 0 });
+    try {
+      const { jobId } = await api.startPlatPricesSeed();
+      closePpStream.current?.();
+      closePpStream.current = createPlatPricesStream(jobId, (msg) => {
+        setPpProgress(msg);
+        if (msg.status === 'done' || msg.status === 'error' || msg.status === 'cancelled') {
+          setPpSeeding(false);
+          closePpStream.current?.();
+          // Refresh pp stats
+          api.getPlatPricesStatus().then(s => setPpStatus(s)).catch(() => {});
+          // Reload bulk data so Hist. column populates
+          load();
+        }
+      });
+    } catch (e) {
+      setPpSeeding(false);
       showToast?.(`Error: ${e.message}`);
     }
   }
@@ -194,12 +237,38 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
                 📊 Historial: {histStats.gamesWithHistory}/{histStats.totalGames} juegos
               </span>
             )}
+            {ppStatus?.stats && ppStatus.stats.total > 0 && (
+              <span
+                style={{ fontSize: 11, color: 'var(--muted)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '2px 8px' }}
+                title="Datos de PlatPrices cacheados localmente (última oferta histórica por juego)"
+              >
+                📈 PlatPrices: {ppStatus.stats.withSale}/{ppStatus.stats.total} con historial
+                {ppStatus.stats.onSale > 0 && ` · 🔥 ${ppStatus.stats.onSale} en oferta`}
+              </span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-outline" onClick={() => setCatalogOpen(o => !o)}>
             📋 Catálogo ({catalog.length})
           </button>
+          {/* Show PlatPrices seed button when key is configured */}
+          {ppStatus?.keyConfigured && (
+            <button
+              className="btn btn-outline"
+              onClick={handlePpSeed}
+              disabled={ppSeeding || running}
+              title={ppStatus.stats?.total === 0
+                ? 'Descarga datos históricos de ventas para los 384 juegos del catálogo (tarda ~50 min, respeta el límite de 500 req/hora)'
+                : `Actualiza datos de PlatPrices (${ppStatus.stats?.total} ya en caché)`}
+            >
+              {ppSeeding
+                ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Seeding PlatPrices...</>
+                : ppStatus?.stats?.total === 0
+                  ? '📈 Inicializar historial'
+                  : '📈 Actualizar PlatPrices'}
+            </button>
+          )}
           <button className="btn btn-primary" onClick={handleRefresh} disabled={running}>
             {running
               ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</>
@@ -207,6 +276,24 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
           </button>
         </div>
       </div>
+
+      {/* ── PlatPrices seed progress ──────────────────────────────────────── */}
+      {ppSeeding && ppProgress && (
+        <div className="card" style={{ marginBottom: 14, borderColor: 'rgba(124,92,252,.3)' }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--primary-h)', marginBottom: 6 }}>
+            📈 Descargando historial de PlatPrices...
+          </div>
+          <div className="progress-bar-wrap">
+            <div className="progress-bar" style={{ width: `${ppProgress.progress || 0}%`, background: 'var(--primary)' }} />
+          </div>
+          <div className="progress-msg">{ppProgress.message}</div>
+          {ppProgress.skipped > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
+              {ppProgress.skipped} ya estaban en caché — saltados
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Catalog panel ────────────────────────────────────────────────── */}
       {catalogOpen && (

@@ -46,6 +46,10 @@ export const api = {
   addToCatalog:     (name) => apiFetch('/catalog', { method: 'POST', body: JSON.stringify({ name }) }),
   removeFromCatalog:(id)   => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
   updateCatalogLang:(id, spanishAudio, spanishText) => apiFetch(`/catalog/${id}/lang`, { method: 'PUT', body: JSON.stringify({ spanishAudio, spanishText }) }),
+
+  // PlatPrices — price history seed
+  getPlatPricesStatus: ()  => apiFetch('/platprices/status'),
+  startPlatPricesSeed: ()  => apiFetch('/platprices/seed', { method: 'POST' }),
 };
 
 export function createProgressStream(batchId, onMessage) {
@@ -59,6 +63,15 @@ export function createProgressStream(batchId, onMessage) {
 
 export function createHistoryStream(jobId, onMessage) {
   const es = new EventSource(`/api/history/progress/${jobId}`);
+  es.onmessage = (e) => {
+    try { onMessage(JSON.parse(e.data)); } catch (_) {}
+  };
+  es.onerror = () => es.close();
+  return () => es.close();
+}
+
+export function createPlatPricesStream(jobId, onMessage) {
+  const es = new EventSource(`/api/platprices/progress/${jobId}`);
   es.onmessage = (e) => {
     try { onMessage(JSON.parse(e.data)); } catch (_) {}
   };

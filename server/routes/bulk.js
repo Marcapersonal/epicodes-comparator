@@ -42,8 +42,32 @@ router.get('/', (req, res) => {
   const sortMap = { saving: 'saving_usd DESC', cheapest: 'real_cost_usd ASC', verdict: 'verdict ASC' };
   query += ` ORDER BY ${sortMap[sort] || 'saving_usd DESC'}`;
 
+  const rows = db.prepare(query).all(...params);
+
+  // Enrich rows with PlatPrices cache data (keyed by catalog_name)
+  // Load the entire cache once and join in JS — avoids a complex LEFT JOIN
+  let ppMap = {};
+  try {
+    const ppRows = db.prepare(
+      'SELECT game_name, last_discounted, discount_until, discount_pct FROM platprices_cache'
+    ).all();
+    for (const r of ppRows) ppMap[r.game_name.toLowerCase()] = r;
+  } catch (_) {}
+
+  const enriched = rows.map(r => {
+    const key = (r.catalog_name || r.game_name || '').toLowerCase();
+    const pp  = ppMap[key];
+    if (!pp) return r;
+    return {
+      ...r,
+      pp_last_discounted: pp.last_discounted,
+      pp_discount_until:  pp.discount_until,
+      pp_discount_pct:    pp.discount_pct,
+    };
+  });
+
   res.json({
-    results:   db.prepare(query).all(...params),
+    results:   enriched,
     batchId:   latestBatch.batch_id,
     updatedAt: latestBatch.ts,
     active:    activeBatch,
@@ -95,6 +119,8 @@ router.post('/refresh', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
 async function runBulkScrape(batchId) {
   const emit = (data) => { Object.assign(activeBatch, data); broadcastProgress(batchId, activeBatch); };
   const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;

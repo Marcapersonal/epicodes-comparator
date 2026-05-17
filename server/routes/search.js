@@ -4,27 +4,38 @@ const { searchPsStoreUS }   = require('../scrapers/psstore');
 const { searchGamesTurkey } = require('../scrapers/gamesturkey');
 const { getVerdict, predictNextSale } = require('../services/comparison');
 const { getGiftCardRate, getMinHistoricalPrice, getPriceDetailHistory, detectSaleDates } = require('../db/database');
+const { fetchPlatPrices }   = require('../services/platprices');
+const { analyzeSaleCycle }  = require('../engine/predictor');
 
 router.get('/', async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.status(400).json({ error: 'query requerida' });
 
   try {
-    // Run both scrapers in parallel
-    const [psResult, turkeyResult] = await Promise.allSettled([
-      searchPsStoreUS(query),
-      searchGamesTurkey(query),
+    // Run PS Store, Turkey, and PlatPrices in parallel.
+    // PlatPrices has a 5-second timeout so it never blocks the response
+    // when the cache is cold; subsequent calls are instant (cached 7 days).
+    const ppWithTimeout = Promise.race([
+      fetchPlatPrices(query),
+      new Promise(resolve => setTimeout(() => resolve(null), 5000)),
     ]);
 
-    const ps     = psResult.status === 'fulfilled'     ? psResult.value     : { found: false, error: psResult.reason?.message };
+    const [psResult, turkeyResult, ppResult] = await Promise.allSettled([
+      searchPsStoreUS(query),
+      searchGamesTurkey(query),
+      ppWithTimeout,
+    ]);
+
+    const ps     = psResult.status     === 'fulfilled' ? psResult.value     : { found: false, error: psResult.reason?.message };
     const turkey = turkeyResult.status === 'fulfilled' ? turkeyResult.value : { found: false, error: turkeyResult.reason?.message };
+    // pp may be null (key not set, timeout, no result)
 
     const giftCardRate = getGiftCardRate();
     const realCostUsd  = ps.priceUsd != null ? Math.round(ps.priceUsd * giftCardRate * 100) / 100 : null;
 
-    // Historical data
-    const gameName = ps.title || query;
-    const minHist  = getMinHistoricalPrice(gameName);
+    // Historical data — use canonical title if found, else raw query
+    const gameName    = ps.title || query;
+    const minHist     = getMinHistoricalPrice(gameName);
     const saleDatesDb = detectSaleDates(gameName);
     const allSaleDates = [...(ps.saleDates || []), ...saleDatesDb.map(d => d.date)];
     const nextSalePrediction = predictNextSale(allSaleDates);
@@ -35,7 +46,10 @@ router.get('/', async (req, res) => {
       nextSalePrediction,
     });
 
-    // Price history for chart — prefer scraped, fall back to DB
+    // Rich sale-cycle analysis (combines PlatPrices cache + our own history)
+    const saleAnalysis = analyzeSaleCycle(gameName);
+
+    // Price history for chart
     const priceHistory = ps.history?.length
       ? ps.history
       : getPriceDetailHistory(gameName);
@@ -66,12 +80,15 @@ router.get('/', async (req, res) => {
       },
       comparison: {
         realCostUsd,
-        minHistoricalUsd: minHist || ps.lowestUsd || null,
-        minRealCostUsd:   (minHist || ps.lowestUsd) ? Math.round((minHist || ps.lowestUsd) * giftCardRate * 100) / 100 : null,
-        lastSaleDate:     allSaleDates[allSaleDates.length - 1] || null,
+        minHistoricalUsd:  minHist || ps.lowestUsd || null,
+        minRealCostUsd:    (minHist || ps.lowestUsd)
+          ? Math.round((minHist || ps.lowestUsd) * giftCardRate * 100) / 100
+          : null,
+        lastSaleDate:      allSaleDates[allSaleDates.length - 1] || null,
         nextSalePrediction,
         verdict,
       },
+      saleAnalysis,
       priceHistory,
     });
   } catch (err) {

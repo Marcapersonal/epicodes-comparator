@@ -31,6 +31,38 @@ function LangCell({ spanishAudio, spanishText }) {
   );
 }
 
+// ── "Hist." column cell ───────────────────────────────────────────────────────
+// Shows days since last PS Store sale. Data comes from pp_last_discounted
+// (PlatPrices) injected into bulk results by the server.
+function HistCell({ lastDiscounted, discountUntil }) {
+  const now = new Date();
+
+  // On sale right now
+  if (discountUntil && new Date(discountUntil) > now) {
+    return (
+      <span title={`En oferta hasta ${discountUntil}`} style={{ fontSize: 13 }}>
+        🔥
+      </span>
+    );
+  }
+
+  if (!lastDiscounted) return <span style={{ color: 'var(--dim)' }}>—</span>;
+
+  const days = Math.floor((now - new Date(lastDiscounted)) / 86400000);
+  const color = days < 60  ? 'var(--green)'
+              : days < 120 ? 'var(--yellow)'
+              : 'var(--red)';
+
+  return (
+    <span
+      title={`Última oferta: ${lastDiscounted} — hace ${days} días`}
+      style={{ color, fontWeight: 600, fontSize: 12 }}
+    >
+      {days}d
+    </span>
+  );
+}
+
 export default function BulkTable({ rows, giftCardRate }) {
   const [sortKey, setSortKey] = useState('saving_usd');
   const [sortAsc, setSortAsc] = useState(false);
@@ -41,14 +73,27 @@ export default function BulkTable({ rows, giftCardRate }) {
     const verdict     = getVerdict(realCost, r.turkey_price, { giftCardRate });
     const saving      = verdict.saving || 0;
     const minRealCost = calcRealCost(r.min_hist_usd, giftCardRate);
-    return { ...r, _realCost: realCost, _verdict: verdict, _saving: saving, _verdictType: verdict.type, _minRealCost: minRealCost };
+    // Days since last sale (for sort)
+    const daysSince   = r.pp_last_discounted
+      ? Math.floor((Date.now() - new Date(r.pp_last_discounted)) / 86400000)
+      : null;
+    return {
+      ...r,
+      _realCost: realCost, _verdict: verdict, _saving: saving,
+      _verdictType: verdict.type, _minRealCost: minRealCost,
+      _daysSince: daysSince,
+    };
   }), [rows, giftCardRate]);
 
   const sorted = useMemo(() => {
     const clone = [...computed];
     clone.sort((a, b) => {
-      let va = sortKey === '_verdict' ? a._verdictType : (a[sortKey] ?? a[`_${sortKey}`] ?? null);
-      let vb = sortKey === '_verdict' ? b._verdictType : (b[sortKey] ?? b[`_${sortKey}`] ?? null);
+      let va = sortKey === '_verdict'   ? a._verdictType
+             : sortKey === '_daysSince' ? a._daysSince
+             : (a[sortKey] ?? a[`_${sortKey}`] ?? null);
+      let vb = sortKey === '_verdict'   ? b._verdictType
+             : sortKey === '_daysSince' ? b._daysSince
+             : (b[sortKey] ?? b[`_${sortKey}`] ?? null);
       if (typeof va === 'string') va = va.toLowerCase();
       if (typeof vb === 'string') vb = vb.toLowerCase();
       if (va == null) return 1;
@@ -82,6 +127,7 @@ export default function BulkTable({ rows, giftCardRate }) {
           <col className="col-min" />
           <col className="col-sale" />
           <col className="col-lang" />
+          <col className="col-hist" />
         </colgroup>
         <thead>
           <tr>
@@ -94,6 +140,7 @@ export default function BulkTable({ rows, giftCardRate }) {
             {th('min_hist_usd', 'Mín. real', { textAlign: 'right' })}
             {th('ps_sale_end',  'Fin oferta', { textAlign: 'center' })}
             <th style={{ textAlign: 'center' }}>ES</th>
+            {th('_daysSince',   'Hist.', { textAlign: 'center' })}
           </tr>
         </thead>
         <tbody>
@@ -130,6 +177,9 @@ export default function BulkTable({ rows, giftCardRate }) {
                 </td>
                 <td style={{ textAlign: 'center' }}>
                   <LangCell spanishAudio={!!r.spanish_audio} spanishText={!!r.spanish_text} />
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <HistCell lastDiscounted={r.pp_last_discounted} discountUntil={r.pp_discount_until} />
                 </td>
               </tr>
             );
