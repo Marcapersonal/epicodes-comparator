@@ -138,10 +138,9 @@ async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14
 async function scrapeProductLang(url) {
   try {
     const html = await getHtml(url);
-    // Match <strong>Audio:</strong> followed by languages on same line
-    const spanishAudio = /<strong>\s*(?:Audio|Voice)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
-    // Match Interface / Text / Subtitles sections
-    const spanishText  = /<strong>\s*(?:Interface|Text|Subtitle)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+    // <strong> tags have class attributes: <strong class="...">Audio:</strong> English, ..., Spanish, ...
+    const spanishAudio = /<strong[^>]*>\s*(?:Audio|Voice)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+    const spanishText  = /<strong[^>]*>\s*(?:Interface|Text|Subtitle)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
     return { spanishAudio, spanishText };
   } catch (_) {
     return { spanishAudio: false, spanishText: false };

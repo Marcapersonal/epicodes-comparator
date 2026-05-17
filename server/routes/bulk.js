@@ -124,6 +124,10 @@ async function runBulkScrape(batchId) {
   const fuseT = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.45 });
 
   // STEP 3.5 — Fetch Spanish language support from GamesturkeyACC detail pages (cached)
+  // Clear stale cache entries that were stored with the broken regex (all false)
+  try {
+    getDb().exec("DELETE FROM lang_cache WHERE spanish_audio = 0 AND spanish_text = 0 AND checked_at < datetime('now', '-1 hour')");
+  } catch (_) {}
   emit({ message: '🌐 Verificando soporte de español en GamesturkeyACC...', progress: 14 });
   const langByUrl = {};
   const uniqueUrls = [...new Set(turkeyProducts.map(p => p.url).filter(Boolean))];
@@ -188,9 +192,8 @@ async function runBulkScrape(batchId) {
     const game     = catalog[i];
     const ps       = psResults[i];
     const variants = ps?.variants || [];
-    const minHist  = getMinHistoricalPrice(game.name);
 
-    // Record the cheapest variant price for history tracking
+    // Record the cheapest variant price FIRST so getMinHistoricalPrice includes it
     if (variants.length > 0 && variants[0].priceUsd != null) {
       try {
         recordPrice(game.name, 'psstore-us', variants[0].priceUsd, {
@@ -201,6 +204,9 @@ async function runBulkScrape(batchId) {
         });
       } catch (_) {}
     }
+
+    // Now query historical min — includes the price we just recorded
+    const minHist = getMinHistoricalPrice(game.name);
 
     if (variants.length === 0) {
       // No PS Store data — insert one placeholder row so the game still appears
