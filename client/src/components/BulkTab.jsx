@@ -12,7 +12,19 @@ const FILTER_OPTIONS = [
   { value: 'NO_DATA',    label: '❓ Sin precio PS Store' },
 ];
 
-export default function BulkTab({ giftCardRate, showToast }) {
+export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
+  // ── Local gift-card rate (overrides prop, persisted to server on blur) ──────
+  const [localRate,    setLocalRate]    = useState(null); // null = use prop
+
+  const giftCardRate = localRate ?? giftCardRateProp;
+
+  async function handleRateChange(val) {
+    const n = parseFloat(val);
+    if (isNaN(n) || n <= 0) return;
+    setLocalRate(n);
+    try { await api.saveSettings({ gift_card_rate: n }); } catch (_) {}
+  }
+
   // ── Bulk state ──────────────────────────────────────────────────────────────
   const [data,         setData]         = useState(null);
   const [loading,      setLoading]      = useState(true);
@@ -410,9 +422,22 @@ export default function BulkTab({ giftCardRate, showToast }) {
           onChange={e => setMinSaving(e.target.value)}
           style={{ width: 70 }}
         />
+        <span className="filter-label" style={{ marginLeft: 8 }}>Tasa GC:</span>
+        <input
+          className="filter-input"
+          type="number"
+          step="0.01"
+          min="0.01"
+          max="2"
+          value={localRate ?? giftCardRateProp}
+          onChange={e => setLocalRate(parseFloat(e.target.value) || null)}
+          onBlur={e => handleRateChange(e.target.value)}
+          style={{ width: 64 }}
+          title="Tasa de gift card: precio PS Store US × esta tasa = tu costo real"
+        />
         {results.length > 0 && (
           <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 'auto' }}>
-            {results.length} juegos{tableFilter ? ` (filtrado de ${data?.results?.length})` : ''}
+            {results.length} ediciones{tableFilter ? ` (filtrado de ${data?.results?.length})` : ''}
           </span>
         )}
       </div>

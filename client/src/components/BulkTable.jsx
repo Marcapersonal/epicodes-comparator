@@ -12,42 +12,47 @@ const VERDICT_CHIPS = {
 
 function fmt(n) { return n != null ? `$${Number(n).toFixed(2)}` : '—'; }
 
-function LangBadge({ spanishAudio, spanishText, notSet }) {
-  if (notSet) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>No marcado</span>;
-  if (!spanishAudio && !spanishText) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>Sin español</span>;
+function fmtDate(d) {
+  if (!d) return '—';
+  try {
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return '—';
+    return dt.toLocaleDateString('es-AR', { day: 'numeric', month: 'short' });
+  } catch (_) { return '—'; }
+}
+
+function LangCell({ spanishAudio, spanishText }) {
+  if (!spanishAudio && !spanishText) return <span style={{ color: 'var(--dim)', fontSize: 11 }}>—</span>;
   return (
-    <span style={{ display: 'inline-flex', gap: 6, fontSize: 12 }}>
-      {spanishAudio && <span title="Audio en español" style={{ background: 'rgba(0,200,83,.15)', color: 'var(--green)', padding: '2px 7px', borderRadius: 10, fontWeight: 600 }}>🎙️ Audio</span>}
-      {spanishText  && <span title="Texto/subtítulos en español" style={{ background: 'rgba(100,160,255,.15)', color: '#6ab0ff', padding: '2px 7px', borderRadius: 10, fontWeight: 600 }}>📝 Texto</span>}
+    <span style={{ display: 'inline-flex', gap: 4 }}>
+      {spanishAudio && <span title="Audio en español" style={{ fontSize: 13 }}>🎙️</span>}
+      {spanishText  && <span title="Texto/subtítulos en español" style={{ fontSize: 13 }}>📝</span>}
     </span>
   );
 }
 
-// langMap: { [game_name_lowercase]: { id, spanishAudio, spanishText } }
 export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
-  const [sortKey,  setSortKey]  = useState('saving_usd');
-  const [sortAsc,  setSortAsc]  = useState(false);
-  const [expanded, setExpanded] = useState(null);
+  const [sortKey, setSortKey] = useState('saving_usd');
+  const [sortAsc, setSortAsc] = useState(false);
 
   // Live-recalculate real cost and verdict with current giftCardRate
   const computed = useMemo(() => rows.map(r => {
     const realCost    = calcRealCost(r.ps_price_usd, giftCardRate);
     const verdict     = getVerdict(realCost, r.turkey_price, { giftCardRate });
     const saving      = verdict.saving || 0;
-    // _verdictType is a plain string for sorting
-    return { ...r, _realCost: realCost, _verdict: verdict, _saving: saving, _verdictType: verdict.type };
+    const minRealCost = calcRealCost(r.min_hist_usd, giftCardRate);
+    return { ...r, _realCost: realCost, _verdict: verdict, _saving: saving, _verdictType: verdict.type, _minRealCost: minRealCost };
   }), [rows, giftCardRate]);
 
   const sorted = useMemo(() => {
     const clone = [...computed];
     clone.sort((a, b) => {
-      // For verdict, sort by type string; for others use numeric or string comparison
-      let va = sortKey === '_verdict' ? a._verdictType : (a[sortKey] ?? a[`_${sortKey}`] ?? 0);
-      let vb = sortKey === '_verdict' ? b._verdictType : (b[sortKey] ?? b[`_${sortKey}`] ?? 0);
+      let va = sortKey === '_verdict' ? a._verdictType : (a[sortKey] ?? a[`_${sortKey}`] ?? null);
+      let vb = sortKey === '_verdict' ? b._verdictType : (b[sortKey] ?? b[`_${sortKey}`] ?? null);
       if (typeof va === 'string') va = va.toLowerCase();
       if (typeof vb === 'string') vb = vb.toLowerCase();
-      if (va == null) va = sortAsc ? 'zzz' : '';
-      if (vb == null) vb = sortAsc ? 'zzz' : '';
+      if (va == null) return 1;
+      if (vb == null) return -1;
       return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
     });
     return clone;
@@ -58,8 +63,8 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
     else { setSortKey(key); setSortAsc(false); }
   }
 
-  const th = (key, label) => (
-    <th onClick={() => toggleSort(key)}>
+  const th = (key, label, style = {}) => (
+    <th onClick={() => toggleSort(key)} style={style}>
       {label} {sortKey === key ? (sortAsc ? '↑' : '↓') : ''}
     </th>
   );
@@ -70,65 +75,57 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
         <thead>
           <tr>
             {th('game_name',    'Juego')}
-            {th('ps_price_usd', 'PS Store US')}
-            {th('_realCost',    'Tu costo real')}
+            {th('ps_price_usd', 'PS Store')}
+            {th('_realCost',    'Real')}
             {th('turkey_price', 'Turquía')}
             {th('_saving',      'Ahorro')}
             {th('_verdict',     'Veredicto')}
+            {th('min_hist_usd', 'Mín. real', { textAlign: 'right' })}
+            {th('ps_sale_end',  'Oferta hasta', { textAlign: 'center' })}
+            <th style={{ textAlign: 'center' }}>Idioma</th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((r, i) => {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
-            const isOpen = expanded === i;
-            // Use catalog_name (original catalog entry) for lang lookup; fall back to game_name
             const catalogKey = (r.catalog_name || r.game_name)?.toLowerCase();
+            const lang = langMap[catalogKey];
 
             return (
-              <>
-                <tr key={r.id || i} onClick={() => setExpanded(isOpen ? null : i)} style={{ cursor: 'pointer' }}>
-                  <td style={{ fontWeight: 600, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {isOpen ? '▾ ' : '▸ '}{r.game_name}
-                  </td>
-                  <td>
-                    {r.ps_detail_url
-                      ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{fmt(r.ps_price_usd)}</a>
-                      : fmt(r.ps_price_usd)}
-                    {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 4 }}>-{r.ps_discount_pct}%</span>}
-                  </td>
-                  <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
-                  <td>
-                    {r.turkey_price
-                      ? <a href={r.turkey_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{fmt(r.turkey_price)}</a>
-                      : <span style={{ color: 'var(--dim)' }}>—</span>}
-                  </td>
-                  <td style={{ color: r._saving > 0 ? 'var(--green)' : 'var(--dim)' }}>
-                    {r._saving > 0 ? fmt(r._saving) : '—'}
-                  </td>
-                  <td>
-                    <span className={`verdict-chip ${chip.cls}`}>{chip.label}</span>
-                  </td>
-                </tr>
-                {isOpen && (
-                  <tr key={`${i}-detail`}>
-                    <td colSpan="6" style={{ background: 'var(--surface)', padding: '12px 16px' }}>
-                      <div style={{ fontSize: 13, color: 'var(--muted)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px' }}>
-                        <div>Mínimo histórico: <b style={{ color: 'var(--text)' }}>{fmt(r.min_hist_usd)}</b></div>
-                        <div>Costo al mínimo: <b style={{ color: 'var(--primary-h)' }}>{calcRealCost(r.min_hist_usd, giftCardRate) ? fmt(calcRealCost(r.min_hist_usd, giftCardRate)) : '—'}</b></div>
-                        <div>Fin de oferta: <b style={{ color: 'var(--yellow)' }}>{r.ps_sale_end || '—'}</b></div>
-                        <div>Tasa usada: <b style={{ color: 'var(--text)' }}>{giftCardRate.toFixed(2)}</b></div>
-                        <div style={{ gridColumn: '1/-1', marginTop: 4 }}>
-                          {(() => {
-                            const lang = langMap[catalogKey];
-                            return <>Idioma español: <LangBadge spanishAudio={lang?.spanishAudio} spanishText={lang?.spanishText} notSet={!lang} /></>;
-                          })()}
-                        </div>
-                        <div style={{ gridColumn: '1/-1', marginTop: 4 }}><i>{r._verdict.sublabel || ''}</i></div>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </>
+              <tr key={r.id || i}>
+                <td style={{ fontWeight: 600, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.ps_detail_url
+                    ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer">{r.game_name}</a>
+                    : r.game_name}
+                </td>
+                <td>
+                  <span style={{ whiteSpace: 'nowrap' }}>
+                    {fmt(r.ps_price_usd)}
+                    {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 3 }}>-{r.ps_discount_pct}%</span>}
+                  </span>
+                </td>
+                <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
+                <td>
+                  {r.turkey_price
+                    ? <a href={r.turkey_url} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{fmt(r.turkey_price)}</a>
+                    : <span style={{ color: 'var(--dim)' }}>—</span>}
+                </td>
+                <td style={{ color: r._saving > 0 ? 'var(--green)' : 'var(--dim)' }}>
+                  {r._saving > 0 ? fmt(r._saving) : '—'}
+                </td>
+                <td>
+                  <span className={`verdict-chip ${chip.cls}`}>{chip.label}</span>
+                </td>
+                <td style={{ textAlign: 'right', fontSize: 12, color: r._minRealCost != null ? 'var(--muted)' : 'var(--dim)' }}>
+                  {r._minRealCost != null ? fmt(r._minRealCost) : '—'}
+                </td>
+                <td style={{ textAlign: 'center', fontSize: 11, color: r.ps_sale_end ? 'var(--yellow)' : 'var(--dim)', whiteSpace: 'nowrap' }}>
+                  {fmtDate(r.ps_sale_end)}
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <LangCell spanishAudio={lang?.spanishAudio} spanishText={lang?.spanishText} />
+                </td>
+              </tr>
             );
           })}
         </tbody>
