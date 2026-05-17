@@ -104,6 +104,7 @@ function _migrate(db) {
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_original_price_usd REAL'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_detail_url TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN editions_json TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN catalog_name TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
 

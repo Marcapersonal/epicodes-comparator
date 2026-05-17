@@ -81,22 +81,8 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
           {sorted.map((r, i) => {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
             const isOpen = expanded === i;
-
-            // Parse editions_json — filter out currency packs (FC Points, VC, etc.)
-            let editions = [];
-            if (r.editions_json) {
-              try {
-                const all = JSON.parse(r.editions_json);
-                editions = all.filter(ed => {
-                  const n = ed.title || '';
-                  if (/\b(fc|vc)\s+points?\b/i.test(n)) return false;
-                  if (/\bpoints?\s+[\d,]+/i.test(n)) return false;
-                  if (/-\s*[\d,]+\s*(fc|vc|coins?|points?)\b/i.test(n)) return false;
-                  if (/\b(points?|coins?)\s*$/i.test(n)) return false;
-                  return true;
-                });
-              } catch (_) {}
-            }
+            // Use catalog_name (original catalog entry) for lang lookup; fall back to game_name
+            const catalogKey = (r.catalog_name || r.game_name)?.toLowerCase();
 
             return (
               <>
@@ -133,84 +119,12 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
                         <div>Tasa usada: <b style={{ color: 'var(--text)' }}>{giftCardRate.toFixed(2)}</b></div>
                         <div style={{ gridColumn: '1/-1', marginTop: 4 }}>
                           {(() => {
-                            const lang = langMap[r.game_name?.toLowerCase()];
+                            const lang = langMap[catalogKey];
                             return <>Idioma español: <LangBadge spanishAudio={lang?.spanishAudio} spanishText={lang?.spanishText} notSet={!lang} /></>;
                           })()}
                         </div>
                         <div style={{ gridColumn: '1/-1', marginTop: 4 }}><i>{r._verdict.sublabel || ''}</i></div>
                       </div>
-
-                      {editions.length > 0 && (
-                        <div style={{ marginTop: 10 }}>
-                          <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-                            Comparación por edición — PS Store US vs Turquía
-                          </div>
-                          {/* Column headers */}
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 90px 90px 90px', gap: '0 6px', padding: '2px 10px 6px', fontSize: 10, color: 'var(--dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                            <span>Edición</span>
-                            <span style={{ textAlign: 'right' }}>PS Store</span>
-                            <span style={{ textAlign: 'right' }}>Real (×{giftCardRate.toFixed(2)})</span>
-                            <span style={{ textAlign: 'right' }}>Turquía</span>
-                            <span style={{ textAlign: 'right' }}>Ahorro</span>
-                          </div>
-                          {editions.map((ed, ei) => {
-                            const edCost   = calcRealCost(ed.priceUsd, giftCardRate);
-                            const tPrice   = ed.turkeyPriceUsd ?? null;
-                            const saving   = edCost != null && tPrice != null ? tPrice - edCost : null;
-                            const psWins   = saving != null && saving > 0.5;
-                            const tWins    = saving != null && saving < -0.5;
-                            const isCheapest = ei === 0;
-                            return (
-                              <div
-                                key={ed.title || ei}
-                                style={{
-                                  display: 'grid', gridTemplateColumns: '1fr 90px 90px 90px 90px', gap: '0 6px',
-                                  alignItems: 'center', padding: '5px 10px', marginBottom: 3, borderRadius: 6,
-                                  background: isCheapest && psWins ? 'rgba(0,200,83,.07)'
-                                            : tWins ? 'rgba(220,50,50,.06)' : 'rgba(255,255,255,.03)',
-                                  border: isCheapest && psWins ? '1px solid rgba(0,200,83,.2)'
-                                        : tWins ? '1px solid rgba(220,50,50,.15)' : '1px solid rgba(255,255,255,.05)',
-                                }}
-                              >
-                                {/* Edition name */}
-                                <div style={{ fontSize: 12, color: 'var(--text)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {isCheapest && <span style={{ fontSize: 10, color: 'var(--green)', marginRight: 4 }}>★</span>}
-                                  {ed.detailUrl
-                                    ? <a href={ed.detailUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'none' }}>{ed.title}</a>
-                                    : ed.title}
-                                </div>
-                                {/* PS Store price */}
-                                <div style={{ textAlign: 'right', fontSize: 12, fontWeight: 600 }}>
-                                  {fmt(ed.priceUsd)}
-                                  {ed.discount > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 3 }}>-{ed.discount}%</span>}
-                                </div>
-                                {/* Real cost */}
-                                <div style={{ textAlign: 'right', fontSize: 12, color: psWins ? 'var(--green)' : 'var(--primary-h)', fontWeight: psWins ? 700 : 400 }}>
-                                  {fmt(edCost)}
-                                </div>
-                                {/* Turkey price */}
-                                <div style={{ textAlign: 'right', fontSize: 12, color: tWins ? 'var(--red)' : 'var(--muted)' }}>
-                                  {tPrice != null
-                                    ? (ed.turkeyUrl
-                                      ? <a href={ed.turkeyUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit' }}>{fmt(tPrice)}</a>
-                                      : fmt(tPrice))
-                                    : <span style={{ color: 'var(--dim)' }}>—</span>}
-                                </div>
-                                {/* Saving */}
-                                <div style={{ textAlign: 'right', fontSize: 11, fontWeight: 600 }}>
-                                  {saving != null
-                                    ? saving > 0.5
-                                      ? <span style={{ color: 'var(--green)' }}>+{fmt(saving)}</span>
-                                      : saving < -0.5
-                                        ? <span style={{ color: 'var(--red)' }}>🇹🇷 {fmt(Math.abs(saving))}</span>
-                                        : <span style={{ color: 'var(--dim)' }}>≈</span>
-                                    : <span style={{ color: 'var(--dim)' }}>—</span>}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
                     </td>
                   </tr>
                 )}

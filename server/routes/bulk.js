@@ -5,7 +5,7 @@ const Fuse = require('fuse.js');
 const { bulkLookup }        = require('../scrapers/psstore');
 const { scrapeAllProducts } = require('../scrapers/gamesturkey');
 const { getVerdict }        = require('../services/comparison');
-const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog } = require('../db/database');
+const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog, recordPrice } = require('../db/database');
 // Lazy-loaded to prevent playwright-extra/stealth from patching Node internals at startup
 let _historyRoute = null;
 function getHistoryRoute() { return _historyRoute || (_historyRoute = require('./history')); }
@@ -133,79 +133,95 @@ async function runBulkScrape(batchId) {
 
   emit({ message: '💾 Cruzando datos y guardando...', progress: 87 });
 
-  // STEP 5 — Cross-match and compute verdicts
+  // STEP 5 — Cross-match and compute verdicts — ONE ROW PER EDITION
   const giftCardRate = getGiftCardRate();
   const db  = getDb();
   const now = new Date().toISOString();
 
+  // Per-edition Turkey fuzzy matcher (slightly stricter threshold)
+  const fuseEdition = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.40 });
+
   const insertBulk = db.prepare(`
     INSERT INTO bulk_results
-      (batch_id, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
+      (batch_id, catalog_name, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
        turkey_price, turkey_url, real_cost_usd, min_hist_usd,
        verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url, editions_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const rows = [];
 
   for (let i = 0; i < catalog.length; i++) {
-    const game    = catalog[i];
-    const ps      = psResults[i];
+    const game     = catalog[i];
+    const ps       = psResults[i];
     const variants = ps?.variants || [];
-    const cheapest = variants.length ? variants[0] : (ps?.best || null);
+    const minHist  = getMinHistoricalPrice(game.name);
 
-    const usPriceUsd = cheapest?.priceUsd ?? null;
-    const realCost   = usPriceUsd != null ? Math.round(usPriceUsd * giftCardRate * 100) / 100 : null;
-    const minHist    = getMinHistoricalPrice(game.name);
+    // Record the cheapest variant price for history tracking
+    if (variants.length > 0 && variants[0].priceUsd != null) {
+      try {
+        recordPrice(game.name, 'psstore-us', variants[0].priceUsd, {
+          raw:      variants[0].priceRaw,
+          currency: 'USD',
+          discount: variants[0].discountPct || 0,
+          saleEnd:  variants[0].saleEnd || null,
+        });
+      } catch (_) {}
+    }
 
-    // Find Turkey price via fuzzy match
-    const tHits  = fuseT.search(game.name);
-    const turkey = tHits.length ? tHits[0].item : null;
+    if (variants.length === 0) {
+      // No PS Store data — insert one placeholder row so the game still appears
+      const tHits  = fuseT.search(game.name);
+      const turkey = tHits.length ? tHits[0].item : null;
+      const verdict = getVerdict(null, turkey?.priceUsd ?? null, { minHistoricalUsd: minHist, giftCardRate });
+      rows.push([
+        b(batchId), b(game.name), b(game.name),
+        null, null, 0, null,
+        b(turkey?.priceUsd) ?? null, b(turkey?.url) ?? null,
+        null, b(minHist) ?? null,
+        b(verdict.type), b(verdict.label), b(verdict.saving) ?? 0,
+        b(giftCardRate), b(now), null, null, null,
+      ]);
+      continue;
+    }
 
-    const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
-      minHistoricalUsd: minHist,
-      giftCardRate,
-    });
+    // Insert one row per edition/variant
+    for (const v of variants) {
+      const edTitle    = v.name || v.title || game.name;
+      const usPriceUsd = v.priceUsd ?? null;
+      const realCost   = usPriceUsd != null ? Math.round(usPriceUsd * giftCardRate * 100) / 100 : null;
 
-    // For each PS Store edition, find the closest Turkey edition by fuzzy-matching
-    // the specific variant name (not just the catalog game name).
-    // Use a slightly stricter threshold (0.40) to avoid cross-edition mismatches.
-    const fuseEdition = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.40 });
-    const editionsJson = JSON.stringify(variants.map(v => {
-      const vTitle = v.name || v.title || '';
-      const vHits  = fuseEdition.search(vTitle);
-      const vTurkey = vHits.length ? vHits[0].item : null;
-      return {
-        title:          vTitle,
-        priceUsd:       v.priceUsd,
-        discount:       v.discountPct || v.discount || 0,
-        detailUrl:      v.detailUrl,
-        turkeyPriceUsd: b(vTurkey?.priceUsd) ?? null,
-        turkeyUrl:      vTurkey?.url ?? null,
-        turkeyTitle:    vTurkey?.title ?? null,
-      };
-    }));
+      // Match this specific edition title against Turkey catalog
+      const vHits  = fuseEdition.search(edTitle);
+      const turkey = vHits.length ? vHits[0].item : null;
 
-    rows.push([
-      b(batchId),
-      b(game.name),
-      b(usPriceUsd),
-      b(cheapest?.priceRaw) ?? null,
-      b(cheapest?.discountPct) ?? 0,
-      b(cheapest?.saleEnd) ?? null,
-      b(turkey?.priceUsd) ?? null,
-      b(turkey?.url) ?? null,
-      b(realCost),
-      b(minHist) ?? null,
-      b(verdict.type),
-      b(verdict.label),
-      b(verdict.saving) ?? 0,
-      b(giftCardRate),
-      b(now),
-      b(usPriceUsd),        // us_price_usd — same as ps_price_usd (now US only)
-      b(cheapest?.detailUrl) ?? null,
-      b(editionsJson),
-    ]);
+      const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
+        minHistoricalUsd: minHist,
+        giftCardRate,
+      });
+
+      rows.push([
+        b(batchId),
+        b(game.name),          // catalog_name — original catalog entry
+        b(edTitle),            // game_name — edition title shown in table
+        b(usPriceUsd),
+        b(v.priceRaw) ?? null,
+        b(v.discountPct) ?? 0,
+        b(v.saleEnd) ?? null,
+        b(turkey?.priceUsd) ?? null,
+        b(turkey?.url) ?? null,
+        b(realCost),
+        b(minHist) ?? null,
+        b(verdict.type),
+        b(verdict.label),
+        b(verdict.saving) ?? 0,
+        b(giftCardRate),
+        b(now),
+        b(usPriceUsd),
+        b(v.detailUrl) ?? null,
+        null,                  // editions_json — no longer needed (each edition is its own row)
+      ]);
+    }
   }
 
   db.exec('BEGIN');
@@ -217,10 +233,10 @@ async function runBulkScrape(batchId) {
     throw e;
   }
 
-  const withPrice = rows.filter(r => r[2] != null).length;
+  const withPrice = rows.filter(r => r[3] != null).length;
   activeBatch = {
     id: batchId, status: 'done', progress: 100,
-    message: `✅ Completado — ${rows.length} juegos del catálogo | ${withPrice} con precio PS Store US | ${rows.length - withPrice} sin precio`,
+    message: `✅ Completado — ${catalog.length} títulos del catálogo → ${rows.length} ediciones | ${withPrice} con precio | ${rows.length - withPrice} sin precio`,
   };
   broadcastProgress(batchId, activeBatch);
   setTimeout(() => progressClients.delete(batchId), 60000);
