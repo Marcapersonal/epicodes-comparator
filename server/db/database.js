@@ -298,10 +298,14 @@ function recordPrice(gameName, source, priceUsd, opts = {}) {
 function getMinHistoricalPrice(gameName) {
   const db = getDb();
 
-  // Own scrape history — use price_usd > 1 to exclude DLC-contaminated sub-$1 records
-  // (e.g. "FC Points 100" @ $0.99 mistakenly recorded under a catalog game name)
+  // Own rolling scrapes — filter > 1 to exclude DLC-contaminated sub-$1 records
   const histRow = db.prepare(
     "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd > 1"
+  ).get(gameName);
+
+  // PSDeals detailed Highcharts history (populated by the manual history job)
+  const detailRow = db.prepare(
+    'SELECT MIN(price_usd) as min FROM ps_price_history_detail WHERE game_name = ? AND price_usd > 0'
   ).get(gameName);
 
   // PlatPrices best-ever sale price — authoritative external historical data
@@ -309,7 +313,7 @@ function getMinHistoricalPrice(gameName) {
     'SELECT sale_price_usd FROM platprices_cache WHERE game_name = ? AND sale_price_usd IS NOT NULL'
   ).get(gameName);
 
-  const candidates = [histRow?.min, ppRow?.sale_price_usd].filter(v => v != null);
+  const candidates = [histRow?.min, detailRow?.min, ppRow?.sale_price_usd].filter(v => v != null);
   return candidates.length ? Math.min(...candidates) : null;
 }
 

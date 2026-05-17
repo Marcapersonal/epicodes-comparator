@@ -46,8 +46,8 @@ router.get('/', (req, res) => {
 
   // Enrich rows with PlatPrices cache data (keyed by catalog_name)
   // Load the entire cache once and join in JS — avoids a complex LEFT JOIN
-  // Also use PlatPrices sale_price_usd to correct min_hist_usd for existing rows
-  // (fixes DLC-contaminated minimums and adds external historical price data)
+  // Also use PlatPrices sale_price_usd + PSDeals historical data to correct min_hist_usd
+  // for existing rows (fixes DLC-contaminated minimums and adds external historical data)
   let ppMap = {};
   try {
     const ppRows = db.prepare(
@@ -56,26 +56,38 @@ router.get('/', (req, res) => {
     for (const r of ppRows) ppMap[r.game_name.toLowerCase()] = r;
   } catch (_) {}
 
-  const enriched = rows.map(r => {
-    const key = (r.catalog_name || r.game_name || '').toLowerCase();
-    const pp  = ppMap[key];
-    if (!pp) return r;
+  // PSDeals historical min per game (populated by the manual "Actualizar historial" job)
+  let psdealsMinMap = {};
+  try {
+    const psdealsRows = db.prepare(
+      'SELECT game_name, MIN(price_usd) as min_price FROM ps_price_history_detail WHERE price_usd > 0 GROUP BY game_name'
+    ).all();
+    for (const r of psdealsRows) psdealsMinMap[r.game_name.toLowerCase()] = r.min_price;
+  } catch (_) {}
 
-    // Correct min_hist_usd: use PlatPrices sale price if it's lower (or if we have none)
-    let minHistUsd = r.min_hist_usd;
-    if (pp.sale_price_usd != null) {
-      // Only replace if PlatPrices is better OR if existing min looks contaminated (< $1)
-      if (minHistUsd == null || minHistUsd < 1.0 || pp.sale_price_usd < minHistUsd) {
-        minHistUsd = pp.sale_price_usd;
-      }
+  const enriched = rows.map(r => {
+    const key    = (r.catalog_name || r.game_name || '').toLowerCase();
+    const pp     = ppMap[key];
+    const pdMin  = psdealsMinMap[key] ?? null;
+
+    // Start with stored value; replace if contaminated (< $1)
+    let minHistUsd = (r.min_hist_usd != null && r.min_hist_usd >= 1.0) ? r.min_hist_usd : null;
+
+    // Layer 1: PSDeals Highcharts history (most accurate historical data)
+    if (pdMin != null && (minHistUsd == null || pdMin < minHistUsd)) {
+      minHistUsd = pdMin;
+    }
+    // Layer 2: PlatPrices best-known sale price
+    if (pp?.sale_price_usd != null && (minHistUsd == null || pp.sale_price_usd < minHistUsd)) {
+      minHistUsd = pp.sale_price_usd;
     }
 
     return {
       ...r,
       min_hist_usd:       minHistUsd,
-      pp_last_discounted: pp.last_discounted,
-      pp_discount_until:  pp.discount_until,
-      pp_discount_pct:    pp.discount_pct,
+      pp_last_discounted: pp?.last_discounted ?? null,
+      pp_discount_until:  pp?.discount_until  ?? null,
+      pp_discount_pct:    pp?.discount_pct    ?? null,
     };
   });
 

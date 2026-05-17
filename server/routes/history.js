@@ -126,34 +126,90 @@ async function runHistoryFetch(jobId) {
     broadcastProgress(jobId, activeJob);
   };
   const db = getDb();
+  const triggeredBy = activeJob?.triggeredBy || 'manual';
 
-  // History now builds automatically from every bulk refresh via price_history (source='psstore-us').
-  // This job just computes and reports what we already have.
-  emit({ message: 'Calculando estadísticas de historial...', progress: 30 });
+  // ── Auto-trigger (after bulk refresh): just report stats, no Playwright ──────
+  if (triggeredBy === 'auto-after-bulk') {
+    emit({ message: 'Calculando estadísticas de historial...', progress: 50 });
 
-  const totalGames = db.prepare(
-    "SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'"
-  ).get()?.n || 0;
+    const withDetail  = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM ps_price_history_detail').get()?.n || 0;
+    const withOwn     = db.prepare("SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'").get()?.n || 0;
+    const totalPoints = db.prepare("SELECT COUNT(*) as n FROM price_history WHERE source='psstore-us'").get()?.n || 0;
+    const oldestEntry = db.prepare("SELECT MIN(scraped_at) as d FROM price_history WHERE source='psstore-us'").get()?.d;
+    const since       = oldestEntry ? oldestEntry.slice(0, 10) : '—';
 
-  const totalPoints = db.prepare(
-    "SELECT COUNT(*) as n FROM price_history WHERE source='psstore-us'"
-  ).get()?.n || 0;
+    const now = new Date().toISOString();
+    try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
 
-  const oldestEntry = db.prepare(
-    "SELECT MIN(scraped_at) as d FROM price_history WHERE source='psstore-us'"
-  ).get()?.d;
+    activeJob = {
+      id: jobId, status: 'done', progress: 100, saved: withDetail,
+      message: `📊 ${withOwn} juegos con historial propio desde ${since} — ${withDetail} con historial PSDeals — ${totalPoints} registros. Hacé click en "Actualizar historial" para agregar más.`,
+    };
+    broadcastProgress(jobId, activeJob);
+    clearPersistedJob();
+    setTimeout(() => { progressClients.delete(jobId); }, 60000);
+    return;
+  }
 
-  const gamesWithMultiple = db.prepare(
-    "SELECT COUNT(*) as n FROM (SELECT game_name FROM price_history WHERE source='psstore-us' GROUP BY game_name HAVING COUNT(*) > 1)"
-  ).get()?.n || 0;
+  // ── Manual trigger: scrape PSDeals history with Playwright for games missing it ──
+  emit({ message: '📋 Buscando juegos sin historial PSDeals...', progress: 5 });
+
+  // Find catalog games that don't have PSDeals history yet
+  const allCatalog = db.prepare('SELECT name FROM catalog WHERE active=1').all().map(r => r.name);
+  const withHistory = new Set(
+    db.prepare('SELECT DISTINCT game_name FROM ps_price_history_detail').all().map(r => r.game_name)
+  );
+  const needHistory = allCatalog.filter(name => !withHistory.has(name));
+
+  if (needHistory.length === 0) {
+    const now = new Date().toISOString();
+    try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
+
+    activeJob = {
+      id: jobId, status: 'done', progress: 100, saved: withHistory.size,
+      message: `✅ Todos los juegos ya tienen historial PSDeals (${withHistory.size} juegos).`,
+    };
+    broadcastProgress(jobId, activeJob);
+    clearPersistedJob();
+    setTimeout(() => { progressClients.delete(jobId); }, 60000);
+    return;
+  }
+
+  emit({ message: `🎭 Iniciando Playwright para ${needHistory.length} juegos sin historial...`, progress: 8 });
+
+  let saved = 0;
+  try {
+    const results = await fetchHistoryBatch(needHistory, (prog) => {
+      const pct = 8 + Math.round((prog.done / prog.total) * 87);
+      emit({
+        message:  `PSDeals — ${prog.done}/${prog.total} | ${prog.current}`,
+        progress: pct,
+        saved:    prog.saved,
+      });
+    });
+
+    // Persist fetched history to ps_price_history_detail
+    for (const { name, history } of results) {
+      if (history.length > 0) {
+        try {
+          savePriceDetailHistory(name, history.map(h => ({ price: h.priceUsd, date: h.date })));
+          saved++;
+        } catch (err) {
+          console.warn(`[history] Save failed for "${name}": ${err.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[history] Playwright batch failed:', err.message);
+    emit({ message: `⚠️ Error en Playwright: ${err.message} — guardando lo que hay`, progress: 95 });
+  }
 
   const now = new Date().toISOString();
   try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
 
-  const since = oldestEntry ? oldestEntry.slice(0, 10) : '—';
   activeJob = {
-    id: jobId, status: 'done', progress: 100, saved: gamesWithMultiple,
-    message: `📊 ${totalGames} juegos con datos desde ${since} — ${totalPoints} registros en total. El historial crece automáticamente con cada actualización del listado.`,
+    id: jobId, status: 'done', progress: 100, saved,
+    message: `✅ Historial guardado para ${saved}/${needHistory.length} juegos nuevos`,
   };
   broadcastProgress(jobId, activeJob);
   clearPersistedJob();

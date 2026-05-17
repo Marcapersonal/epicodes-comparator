@@ -159,8 +159,8 @@ function baseTitle(name) {
     // Remove Spanish edition: "Edición Estándar / Ultimate / Deluxe..."
     .replace(/\s+(edici[oó]n)\s+\S+.*/i, '')
     // Remove English edition suffixes with optional dash/colon prefix
-    .replace(/\s*[-–:]\s*(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?)\s*(edition|ed\.?)?\s*$/i, '')
-    .replace(/\s+(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?)\s*(edition|ed\.?)?\s*$/i, '')
+    .replace(/\s*[-–:]\s*(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?|icons?|enhanced|premium|showcase|cross[- ]gen)\s*(edition|ed\.?)?\s*$/i, '')
+    .replace(/\s+(ultimate|deluxe|digital|standard|champions|gold|complete|legendary|vault|founders?|icons?|enhanced|premium|showcase|cross[- ]gen)\s*(edition|ed\.?)?\s*$/i, '')
     // Remove ™ / ® symbols and clean up
     .replace(/[™®]/g, '')
     .replace(/\s+/g, ' ')

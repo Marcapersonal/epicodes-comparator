@@ -143,7 +143,7 @@ export default function BulkTable({ rows, giftCardRate }) {
             {th('turkey_price', 'Turquía')}
             {th('_saving',      'Ahorro')}
             {th('_verdict',     'Veredicto')}
-            {th('min_hist_usd', 'Mín. real', { textAlign: 'right' })}
+            {th('min_hist_usd', 'Mín. hist.', { textAlign: 'right' })}
             {th('ps_sale_end',  'Fin oferta', { textAlign: 'center' })}
             <th style={{ textAlign: 'center' }}>ES</th>
             {th('_daysSince',   'Hist.', { textAlign: 'center' })}
@@ -179,8 +179,14 @@ export default function BulkTable({ rows, giftCardRate }) {
                 <td>
                   <span className={`verdict-chip ${chip.cls}`}>{chip.label}</span>
                 </td>
-                <td style={{ textAlign: 'right', fontSize: 12, color: r._minRealCost != null ? 'var(--muted)' : 'var(--dim)' }}>
-                  {r._minRealCost != null ? fmt(r._minRealCost) : '—'}
+                {/* Historical min: show real cost + raw USD stacked */}
+                <td style={{ textAlign: 'right', fontSize: 12, lineHeight: 1.3 }}>
+                  {r._minRealCost != null ? (
+                    <>
+                      <div style={{ color: 'var(--muted)', fontWeight: 600 }}>{fmt(r._minRealCost)}</div>
+                      <div style={{ color: 'var(--dim)', fontSize: 10 }}>{fmt(r.min_hist_usd)} US</div>
+                    </>
+                  ) : <span style={{ color: 'var(--dim)' }}>—</span>}
                 </td>
                 <td style={{ textAlign: 'center', fontSize: 11, color: r.ps_sale_end ? 'var(--yellow)' : 'var(--dim)', whiteSpace: 'nowrap' }}>
                   {fmtDate(r.ps_sale_end)}
