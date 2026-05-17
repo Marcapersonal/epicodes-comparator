@@ -51,7 +51,7 @@ a:hover { text-decoration: underline; }
 .tab-btn.active { color: var(--primary-h); border-bottom-color: var(--primary); }
 
 /* ── Main content ── */
-.main { flex: 1; padding: 16px; max-width: 700px; margin: 0 auto; width: 100%; }
+.main { flex: 1; padding: 16px; max-width: 1080px; margin: 0 auto; width: 100%; }
 
 /* ── Search bar ── */
 .search-wrap { position: relative; margin-bottom: 20px; }
@@ -145,26 +145,26 @@ a:hover { text-decoration: underline; }
 .bulk-table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); }
 .bulk-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .bulk-table th {
-  background: var(--surface); padding: 7px 7px; text-align: left; font-size: 11px;
+  background: var(--surface); padding: 9px 10px; text-align: left; font-size: 12px;
   color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border);
   white-space: nowrap; cursor: pointer; user-select: none; overflow: hidden;
 }
 .bulk-table th:hover { color: var(--text); }
-.bulk-table td { padding: 7px 7px; border-bottom: 1px solid var(--border); font-size: 12px; overflow: hidden; }
+.bulk-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13px; overflow: hidden; }
 .bulk-table tr:last-child td { border-bottom: none; }
 .bulk-table tr:hover td { background: var(--card2); }
 .bulk-table .verdict-chip {
-  display: inline-block; border-radius: 5px; padding: 2px 6px; font-size: 10px; font-weight: 700;
+  display: inline-block; border-radius: 5px; padding: 2px 7px; font-size: 11px; font-weight: 700;
   white-space: nowrap;
 }
-/* Column widths — tuned so all 9 cols fit ~820px */
-.bulk-table col.col-name    { width: 22%; }
-.bulk-table col.col-ps      { width: 9%; }
+/* Column widths — fixed layout, Juego gets ~30% of 1080px ≈ 320px */
+.bulk-table col.col-name    { width: 30%; }
+.bulk-table col.col-ps      { width: 8%; }
 .bulk-table col.col-real    { width: 8%; }
 .bulk-table col.col-turkey  { width: 8%; }
 .bulk-table col.col-saving  { width: 8%; }
-.bulk-table col.col-verdict { width: 13%; }
-.bulk-table col.col-min     { width: 9%; }
+.bulk-table col.col-verdict { width: 14%; }
+.bulk-table col.col-min     { width: 8%; }
 .bulk-table col.col-sale    { width: 9%; }
 .bulk-table col.col-lang    { width: 7%; }
 .chip-green  { background: rgba(0,230,118,.15); color: var(--green); }
