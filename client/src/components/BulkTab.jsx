@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { api, createProgressStream, createHistoryStream } from '../api.js';
+import { api, createProgressStream } from '../api.js';
 import BulkTable  from './BulkTable.jsx';
 import ResultCard from './ResultCard.jsx';
 
@@ -40,11 +40,8 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
   const [addInput,     setAddInput]     = useState('');
   const [addLoading,   setAddLoading]   = useState(false);
 
-  // ── History job state ───────────────────────────────────────────────────────
-  const [histRunning,  setHistRunning]  = useState(false);
-  const [histProgress, setHistProgress] = useState(null);
-  const [histStats,    setHistStats]    = useState(null);
-  const closeHistStream = useRef(null);
+  // ── History stats (loaded once on mount, no job needed) ─────────────────────
+  const [histStats, setHistStats] = useState(null);
 
   // ── Integrated search state ─────────────────────────────────────────────────
   const [searchInput,   setSearchInput]   = useState('');
@@ -71,15 +68,10 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
 
   useEffect(() => { load(); }, [filter, minSaving]); // eslint-disable-line
 
-  // On mount: check if a history job is already running server-side and reconnect
+  // On mount: load history stats (data is always persistent in DB)
   useEffect(() => {
-    api.getHistoryStatus().then(({ active, stats }) => {
+    api.getHistoryStatus().then(({ stats }) => {
       if (stats) setHistStats(stats);
-      if (active?.status === 'running') {
-        setHistRunning(true);
-        setHistProgress(active);
-        listenHistoryProgress(active.id);
-      }
     }).catch(() => {});
   }, []); // eslint-disable-line
 
@@ -157,34 +149,6 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
     }
   }
 
-  // ── History job ─────────────────────────────────────────────────────────────
-  function listenHistoryProgress(jobId) {
-    closeHistStream.current?.();
-    closeHistStream.current = createHistoryStream(jobId, (msg) => {
-      setHistProgress(msg);
-      if (msg.status === 'done' || msg.status === 'error') {
-        setHistRunning(false);
-        closeHistStream.current?.();
-        if (msg.status === 'done') showToast?.(`📊 ${msg.message}`);
-        // Refresh stats after job completes
-        api.getHistoryStatus().then(({ stats }) => { if (stats) setHistStats(stats); }).catch(() => {});
-      }
-    });
-  }
-
-  async function handleLoadHistory() {
-    if (histRunning || running) return;
-    setHistRunning(true);
-    setHistProgress({ message: 'Conectando con PSDeals...', progress: 0 });
-    try {
-      const { jobId } = await api.startHistoryFetch();
-      listenHistoryProgress(jobId);
-    } catch (e) {
-      setHistRunning(false);
-      showToast?.(`Error: ${e.message}`);
-    }
-  }
-
   // ── Integrated search ───────────────────────────────────────────────────────
   async function handleSearch(e) {
     e?.preventDefault();
@@ -238,31 +202,27 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <div className="card-title" style={{ margin: 0 }}>Explorar Ofertas</div>
-          {data?.updatedAt && (
-            <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-              Actualizado: {new Date(data.updatedAt).toLocaleString('es-AR')}
-            </div>
-          )}
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 2, flexWrap: 'wrap' }}>
+            {data?.updatedAt && (
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                Actualizado: {new Date(data.updatedAt).toLocaleString('es-AR')}
+              </span>
+            )}
+            {histStats && (
+              <span
+                style={{ fontSize: 11, color: 'var(--muted)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '2px 8px' }}
+                title="Historial de precios guardado en la base de datos. Crece automáticamente con cada actualización del listado."
+              >
+                📊 Historial: {histStats.gamesWithHistory}/{histStats.totalGames} juegos
+              </span>
+            )}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-outline" onClick={() => setCatalogOpen(o => !o)}>
             📋 Catálogo ({catalog.length})
           </button>
-          <button
-            className="btn btn-secondary"
-            onClick={handleLoadHistory}
-            disabled={histRunning || running}
-            title={
-              histStats
-                ? `${histStats.gamesWithHistory}/${histStats.totalGames} juegos con datos de precio. El historial crece automáticamente con cada actualización del listado.`
-                : 'Ver estadísticas de historial de precios'
-            }
-          >
-            {histRunning
-              ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Calculando...</>
-              : <>📊 Historial{histStats ? ` (${histStats.gamesWithHistory}/${histStats.totalGames})` : ''}</>}
-          </button>
-          <button className="btn btn-primary" onClick={handleRefresh} disabled={running || histRunning}>
+          <button className="btn btn-primary" onClick={handleRefresh} disabled={running}>
             {running
               ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Scrapeando...</>
               : '🔄 Actualizar listado'}
@@ -386,24 +346,6 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
             <div className="progress-bar" style={{ width: `${progress.progress || 0}%` }} />
           </div>
           <div className="progress-msg">{progress.message}</div>
-        </div>
-      )}
-
-      {/* ── History job progress ──────────────────────────────────────────── */}
-      {histRunning && histProgress && (
-        <div className="card" style={{ marginBottom: 14, borderColor: 'rgba(255,193,7,.4)' }}>
-          <div style={{ fontSize: 12, color: 'var(--yellow)', marginBottom: 6, fontWeight: 600 }}>
-            📊 Estadísticas de historial de precios
-          </div>
-          <div className="progress-bar-wrap">
-            <div className="progress-bar" style={{ width: `${histProgress.progress || 0}%`, background: 'var(--yellow)' }} />
-          </div>
-          <div className="progress-msg">{histProgress.message}</div>
-          {histProgress.saved > 0 && (
-            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
-              {histProgress.saved} juegos con historial guardado
-            </div>
-          )}
         </div>
       )}
 

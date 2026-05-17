@@ -22,7 +22,7 @@ function fmtDate(d) {
 }
 
 function LangCell({ spanishAudio, spanishText }) {
-  if (!spanishAudio && !spanishText) return <span style={{ color: 'var(--dim)', fontSize: 11 }}>—</span>;
+  if (!spanishAudio && !spanishText) return null;
   return (
     <span style={{ display: 'inline-flex', gap: 4 }}>
       {spanishAudio && <span title="Audio en español" style={{ fontSize: 13 }}>🎙️</span>}
