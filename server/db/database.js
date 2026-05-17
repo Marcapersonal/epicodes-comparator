@@ -93,6 +93,13 @@ function _migrate(db) {
       active   INTEGER DEFAULT 1
     );
 
+    CREATE TABLE IF NOT EXISTS lang_cache (
+      turkey_url    TEXT PRIMARY KEY,
+      spanish_audio INTEGER DEFAULT 0,
+      spanish_text  INTEGER DEFAULT 0,
+      checked_at    TEXT    NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_bulk_batch  ON bulk_results(batch_id);
     CREATE INDEX IF NOT EXISTS idx_ph_game     ON price_history(game_name);
     CREATE INDEX IF NOT EXISTS idx_pshd_game   ON ps_price_history_detail(game_name);
@@ -105,6 +112,8 @@ function _migrate(db) {
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_detail_url TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN editions_json TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN catalog_name TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
 
@@ -351,4 +360,19 @@ function updateCatalogLang(id, spanishAudio, spanishText) {
     .run(spanishAudio ? 1 : 0, spanishText ? 1 : 0, id);
 }
 
-module.exports = { getDb, getSetting, setSetting, getGiftCardRate, getArsToUsd, recordPrice, getMinHistoricalPrice, getPriceDetailHistory, savePriceDetailHistory, detectSaleDates, getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang };
+// ── Lang cache ────────────────────────────────────────────────────────────────
+const LANG_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+function getLangCache(turkeyUrl) {
+  const row = getDb().prepare('SELECT spanish_audio, spanish_text, checked_at FROM lang_cache WHERE turkey_url = ?').get(turkeyUrl);
+  if (!row) return null;
+  if (Date.now() - new Date(row.checked_at).getTime() > LANG_CACHE_TTL_MS) return null; // expired
+  return { spanishAudio: !!row.spanish_audio, spanishText: !!row.spanish_text };
+}
+
+function setLangCache(turkeyUrl, spanishAudio, spanishText) {
+  getDb().prepare('INSERT OR REPLACE INTO lang_cache (turkey_url, spanish_audio, spanish_text, checked_at) VALUES (?, ?, ?, ?)')
+    .run(turkeyUrl, spanishAudio ? 1 : 0, spanishText ? 1 : 0, new Date().toISOString());
+}
+
+module.exports = { getDb, getSetting, setSetting, getGiftCardRate, getArsToUsd, recordPrice, getMinHistoricalPrice, getPriceDetailHistory, savePriceDetailHistory, detectSaleDates, getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang, getLangCache, setLangCache };

@@ -130,4 +130,22 @@ async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14
   return allProducts;
 }
 
-module.exports = { searchGamesTurkey, scrapeAllProducts };
+// ─────────────────────────────────────────────────────────────────────────────
+//  Scrape a single product detail page for Spanish language support
+//  Structure: <strong>Audio:</strong> English, French, Spanish, ...
+//             <strong>Interface:</strong> ...  <strong>Subtitles:</strong> ...
+// ─────────────────────────────────────────────────────────────────────────────
+async function scrapeProductLang(url) {
+  try {
+    const html = await getHtml(url);
+    // Match <strong>Audio:</strong> followed by languages on same line
+    const spanishAudio = /<strong>\s*(?:Audio|Voice)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+    // Match Interface / Text / Subtitles sections
+    const spanishText  = /<strong>\s*(?:Interface|Text|Subtitle)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+    return { spanishAudio, spanishText };
+  } catch (_) {
+    return { spanishAudio: false, spanishText: false };
+  }
+}
+
+module.exports = { searchGamesTurkey, scrapeAllProducts, scrapeProductLang };

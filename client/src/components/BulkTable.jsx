@@ -31,7 +31,7 @@ function LangCell({ spanishAudio, spanishText }) {
   );
 }
 
-export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
+export default function BulkTable({ rows, giftCardRate }) {
   const [sortKey, setSortKey] = useState('saving_usd');
   const [sortAsc, setSortAsc] = useState(false);
 
@@ -99,9 +99,6 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
         <tbody>
           {sorted.map((r, i) => {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
-            const catalogKey = (r.catalog_name || r.game_name)?.toLowerCase();
-            const lang = langMap[catalogKey];
-
             return (
               <tr key={r.id || i}>
                 <td style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.game_name}>
@@ -132,7 +129,7 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
                   {fmtDate(r.ps_sale_end)}
                 </td>
                 <td style={{ textAlign: 'center' }}>
-                  <LangCell spanishAudio={lang?.spanishAudio} spanishText={lang?.spanishText} />
+                  <LangCell spanishAudio={!!r.spanish_audio} spanishText={!!r.spanish_text} />
                 </td>
               </tr>
             );

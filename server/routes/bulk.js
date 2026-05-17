@@ -2,10 +2,10 @@ const express = require('express');
 const router  = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const Fuse = require('fuse.js');
-const { bulkLookup }        = require('../scrapers/psstore');
-const { scrapeAllProducts } = require('../scrapers/gamesturkey');
-const { getVerdict }        = require('../services/comparison');
-const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog, recordPrice } = require('../db/database');
+const { bulkLookup }                    = require('../scrapers/psstore');
+const { scrapeAllProducts, scrapeProductLang } = require('../scrapers/gamesturkey');
+const { getVerdict }                    = require('../services/comparison');
+const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog, recordPrice, getLangCache, setLangCache } = require('../db/database');
 // Lazy-loaded to prevent playwright-extra/stealth from patching Node internals at startup
 let _historyRoute = null;
 function getHistoryRoute() { return _historyRoute || (_historyRoute = require('./history')); }
@@ -123,7 +123,39 @@ async function runBulkScrape(batchId) {
   // STEP 3 — Build Turkey Fuse index
   const fuseT = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.45 });
 
-  emit({ message: `✅ ${turkeyProducts.length} productos de Turkey. Buscando en PS Store US (${catalog.length} juegos)...`, progress: 20 });
+  // STEP 3.5 — Fetch Spanish language support from GamesturkeyACC detail pages (cached)
+  emit({ message: '🌐 Verificando soporte de español en GamesturkeyACC...', progress: 14 });
+  const langByUrl = {};
+  const uniqueUrls = [...new Set(turkeyProducts.map(p => p.url).filter(Boolean))];
+  const uncachedUrls = uniqueUrls.filter(url => {
+    const cached = getLangCache(url);
+    if (cached) { langByUrl[url] = cached; return false; }
+    return true;
+  });
+
+  if (uncachedUrls.length > 0) {
+    const LANG_CONCURRENCY = 4;
+    let langDone = 0;
+    async function langWorker(url) {
+      const lang = await scrapeProductLang(url);
+      langByUrl[url] = lang;
+      setLangCache(url, lang.spanishAudio, lang.spanishText);
+      langDone++;
+      if (langDone % 15 === 0 || langDone === uncachedUrls.length) {
+        emit({ message: `🌐 Idiomas: ${langDone + uniqueUrls.length - uncachedUrls.length}/${uniqueUrls.length} verificados`, progress: 14 + Math.round(langDone / uncachedUrls.length * 5) });
+      }
+      await delay(100 + Math.random() * 150);
+    }
+    let langCursor = 0;
+    async function langNext() {
+      if (langCursor >= uncachedUrls.length) return;
+      const url = uncachedUrls[langCursor++];
+      await langWorker(url);
+      await langNext();
+    }
+    await Promise.all(Array.from({ length: Math.min(LANG_CONCURRENCY, uncachedUrls.length) }, langNext));
+  }
+  emit({ message: `✅ ${uniqueUrls.length} productos Turkey | ${Object.values(langByUrl).filter(l => l.spanishAudio).length} con audio ES | ${Object.values(langByUrl).filter(l => l.spanishText).length} con texto ES`, progress: 20 });
 
   // STEP 4 — Lookup each catalog game on PS Store US
   const psResults = await bulkLookup(catalog.map(g => g.name), (prog) => {
@@ -145,8 +177,9 @@ async function runBulkScrape(batchId) {
     INSERT INTO bulk_results
       (batch_id, catalog_name, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
        turkey_price, turkey_url, real_cost_usd, min_hist_usd,
-       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url, editions_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url, editions_json,
+       spanish_audio, spanish_text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const rows = [];
@@ -173,6 +206,7 @@ async function runBulkScrape(batchId) {
       // No PS Store data — insert one placeholder row so the game still appears
       const tHits  = fuseT.search(game.name);
       const turkey = tHits.length ? tHits[0].item : null;
+      const lang   = turkey ? (langByUrl[turkey.url] || {}) : {};
       const verdict = getVerdict(null, turkey?.priceUsd ?? null, { minHistoricalUsd: minHist, giftCardRate });
       rows.push([
         b(batchId), b(game.name), b(game.name),
@@ -181,6 +215,7 @@ async function runBulkScrape(batchId) {
         null, b(minHist) ?? null,
         b(verdict.type), b(verdict.label), b(verdict.saving) ?? 0,
         b(giftCardRate), b(now), null, null, null,
+        lang.spanishAudio ? 1 : 0, lang.spanishText ? 1 : 0,
       ]);
       continue;
     }
@@ -194,6 +229,7 @@ async function runBulkScrape(batchId) {
       // Match this specific edition title against Turkey catalog
       const vHits  = fuseEdition.search(edTitle);
       const turkey = vHits.length ? vHits[0].item : null;
+      const lang   = turkey ? (langByUrl[turkey.url] || {}) : {};
 
       const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
         minHistoricalUsd: minHist,
@@ -219,7 +255,9 @@ async function runBulkScrape(batchId) {
         b(now),
         b(usPriceUsd),
         b(v.detailUrl) ?? null,
-        null,                  // editions_json — no longer needed (each edition is its own row)
+        null,                  // editions_json — no longer needed
+        lang.spanishAudio ? 1 : 0,
+        lang.spanishText ? 1 : 0,
       ]);
     }
   }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react'; // eslint-disable-line no-unused-vars
 import { api, createProgressStream } from '../api.js';
 import BulkTable  from './BulkTable.jsx';
 import ResultCard from './ResultCard.jsx';
@@ -109,19 +109,6 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
     }
   }
 
-  async function handleLangToggle(game, field) {
-    const newVal = !game[field];
-    const updated = { ...game, [field]: newVal };
-    setCatalog(prev => prev.map(g => g.id === game.id ? updated : g));
-    try {
-      await api.updateCatalogLang(game.id, updated.spanish_audio, updated.spanish_text);
-    } catch (err) {
-      // Revert on error
-      setCatalog(prev => prev.map(g => g.id === game.id ? game : g));
-      showToast?.(`Error: ${err.message}`);
-    }
-  }
-
   // ── Bulk refresh ────────────────────────────────────────────────────────────
   function listenProgress(batchId) {
     closeStream.current?.();
@@ -174,15 +161,6 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
     setSearchResult(null);
     setSearchError('');
   }
-
-  // Build langMap from catalog for fast O(1) lookup in BulkTable
-  const langMap = useMemo(() => {
-    const m = {};
-    for (const g of catalog) {
-      m[g.name.toLowerCase()] = { id: g.id, spanishAudio: !!g.spanish_audio, spanishText: !!g.spanish_text };
-    }
-    return m;
-  }, [catalog]);
 
   // Client-side filter: if there's text in the search bar but no committed
   // query yet, filter the bulk table rows by game_name
@@ -250,37 +228,10 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
               {addLoading ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : 'Agregar'}
             </button>
           </form>
-          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
-            Marcá el soporte de español para cada juego — se guarda automáticamente.
-          </div>
           <div style={{ maxHeight: 380, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
             {catalog.map(g => (
               <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 4, background: 'rgba(255,255,255,.03)' }}>
                 <span style={{ flex: 1, fontSize: 12 }}>{g.name}</span>
-                <button
-                  onClick={() => handleLangToggle(g, 'spanish_audio')}
-                  title="Audio en español"
-                  style={{
-                    background: g.spanish_audio ? 'rgba(0,200,83,.2)' : 'rgba(255,255,255,.05)',
-                    border: g.spanish_audio ? '1px solid rgba(0,200,83,.4)' : '1px solid rgba(255,255,255,.1)',
-                    color: g.spanish_audio ? 'var(--green)' : 'var(--dim)',
-                    borderRadius: 8, padding: '2px 8px', fontSize: 11, cursor: 'pointer', fontWeight: 600,
-                  }}
-                >
-                  🎙️
-                </button>
-                <button
-                  onClick={() => handleLangToggle(g, 'spanish_text')}
-                  title="Texto/subtítulos en español"
-                  style={{
-                    background: g.spanish_text ? 'rgba(100,160,255,.2)' : 'rgba(255,255,255,.05)',
-                    border: g.spanish_text ? '1px solid rgba(100,160,255,.4)' : '1px solid rgba(255,255,255,.1)',
-                    color: g.spanish_text ? '#6ab0ff' : 'var(--dim)',
-                    borderRadius: 8, padding: '2px 8px', fontSize: 11, cursor: 'pointer', fontWeight: 600,
-                  }}
-                >
-                  📝
-                </button>
                 <button
                   onClick={() => handleRemoveFromCatalog(g.id, g.name)}
                   style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 14, padding: '0 2px', lineHeight: 1 }}
@@ -409,7 +360,7 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, showToast }) {
       )}
 
       {results.length > 0 && (
-        <BulkTable rows={results} giftCardRate={giftCardRate} langMap={langMap} />
+        <BulkTable rows={results} giftCardRate={giftCardRate} />
       )}
     </div>
   );
