@@ -119,7 +119,7 @@ function parseSearchResults(html) {
 //  Search a single game — returns best fuzzy match + all variants + US price
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Returns true for actual game listings (not DLC, currency packs, etc.)
+// Returns true for actual game listings (not DLC, currency packs, subscriptions)
 function isGameListing(name) {
   const n = name.trim();
   if (!n) return false;
@@ -133,6 +133,15 @@ function isGameListing(name) {
   if (/\b(points?|coins?)\s*$/i.test(n)) return false;
   // Explicit DLC markers
   if (/\b(dlc|season\s+pass|add-?on)\b/i.test(n)) return false;
+  // Subscription services: short names ending in "+" like "GTA+", "EA Play Pro+"
+  // A word (or 2-3 short words) immediately followed by "+", no other content
+  if (/^[\w\s]{1,20}\+\s*$/i.test(n) && n.split(/\s+/).length <= 4) return false;
+  // Explicit subscription / membership language
+  if (/\b(subscription|membership|monthly|annual)\b/i.test(n)) return false;
+  // In-game currency / cash card packs (e.g. "Tiger Shark Cash Card", "Shark Card")
+  if (/\b(cash\s+card|shark\s+card|currency\s+pack|money\s+pack|starter\s+pack)\b/i.test(n)) return false;
+  // Currency amount + unit combos not already caught ("1 million", "$1,000,000")
+  if (/[\$][\d,]+\s*(gta|shark|card)/i.test(n)) return false;
   return true;
 }
 

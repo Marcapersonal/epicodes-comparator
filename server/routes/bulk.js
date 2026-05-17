@@ -188,10 +188,22 @@ async function runBulkScrape(batchId) {
   emit({ message: `✅ ${uniqueUrls.length} productos Turkey | ${Object.values(langByUrl).filter(l => l.spanishAudio).length} con audio ES | ${Object.values(langByUrl).filter(l => l.spanishText).length} con texto ES`, progress: 20 });
 
   // STEP 4 — Lookup each catalog game on PS Store US
-  const psResults = await bulkLookup(catalog.map(g => g.name), (prog) => {
-    const pct = 20 + Math.round((prog.completed / prog.total) * 65);
-    emit({ message: `PS Store US — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
-  });
+  let psResults;
+  try {
+    psResults = await bulkLookup(catalog.map(g => g.name), (prog) => {
+      const pct = 20 + Math.round((prog.completed / prog.total) * 65);
+      emit({ message: `PS Store US — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
+      // Log any per-game errors so they appear in Railway logs
+      if (prog.error) {
+        console.error(`[bulk] PS Store error for "${prog.current}": ${prog.error}`);
+      }
+    });
+  } catch (err) {
+    console.error('[bulk] bulkLookup threw unexpectedly:', err.message, err.stack);
+    // Return { found: false } for every game so the scrape still completes
+    psResults = catalog.map(g => ({ title: g.name, best: null, variants: [], error: err.message }));
+    emit({ message: `⚠️ PS Store falló globalmente: ${err.message} — continuando sin precios US`, progress: 87 });
+  }
 
   emit({ message: '💾 Cruzando datos y guardando...', progress: 87 });
 
@@ -218,6 +230,13 @@ async function runBulkScrape(batchId) {
     const game     = catalog[i];
     const ps       = psResults[i];
     const variants = ps?.variants || [];
+
+    // Log games where PS Store returned nothing (helps debug Railway IP issues)
+    if (ps?.error) {
+      console.error(`[bulk] PS Store error for "${game.name}": ${ps.error}`);
+    } else if (!variants.length) {
+      console.warn(`[bulk] No PS Store result for "${game.name}" (ps.found=${ps?.best != null})`);
+    }
 
     // Record the cheapest variant price FIRST so getMinHistoricalPrice includes it
     if (variants.length > 0 && variants[0].priceUsd != null) {
