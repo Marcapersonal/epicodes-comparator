@@ -12,6 +12,12 @@ const VERDICT_CHIPS = {
 
 function fmt(n) { return n != null ? `$${Number(n).toFixed(2)}` : '—'; }
 
+// PSPrices.com search URL — opens price history page for a game
+function psPricesUrl(name) {
+  const clean = name.replace(/[™®]/g, '').trim();
+  return `https://psprices.com/region-us/search/?q=${encodeURIComponent(clean)}&platform=PS5`;
+}
+
 function fmtDate(d) {
   if (!d) return '—';
   try {
@@ -148,13 +154,17 @@ export default function BulkTable({ rows, giftCardRate }) {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
             return (
               <tr key={r.id || i}>
+                {/* Game name → PSPrices.com for price history */}
                 <td style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.game_name}>
-                  {r.ps_detail_url
-                    ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{r.game_name}</a>
-                    : r.game_name}
+                  <a href={psPricesUrl(r.game_name)} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>
+                    {r.game_name}
+                  </a>
                 </td>
+                {/* PS Store price → Sony store to buy */}
                 <td style={{ whiteSpace: 'nowrap' }}>
-                  {fmt(r.ps_price_usd)}
+                  {r.ps_detail_url
+                    ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{fmt(r.ps_price_usd)}</a>
+                    : fmt(r.ps_price_usd)}
                   {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 2 }}>-{r.ps_discount_pct}%</span>}
                 </td>
                 <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>

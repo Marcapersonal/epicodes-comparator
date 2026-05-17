@@ -177,7 +177,9 @@ async function searchPsStore(query) {
 
   // Fuzzy-match — only consider actual game listings that have a price
   const gameResults = usResults.filter(r => isGameListing(r.name) && r.priceUsd != null);
-  const searchPool  = gameResults.length ? gameResults : usResults.filter(r => r.priceUsd != null);
+  // Fallback: game listings (no DLC) without price requirement — handles free games.
+  // NEVER fall back to all results; that lets DLC like "FC Points 5900" sneak in.
+  const searchPool  = gameResults.length ? gameResults : usResults.filter(r => isGameListing(r.name));
   const fuse = new Fuse(searchPool, { keys: ['name'], threshold: 0.45, includeScore: true });
   const usHits = fuse.search(query);
   const best = usHits.length ? usHits[0].item : (searchPool[0] || null);
