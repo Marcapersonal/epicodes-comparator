@@ -2,12 +2,12 @@ import { useState, useMemo } from 'react';
 import { calcRealCost, getVerdict } from '../utils/comparison.js';
 
 const VERDICT_CHIPS = {
-  BUY_AR:      { label: '✅ COMPRÁ VOS',   cls: 'chip-green'  },
-  BUY_TURKEY:  { label: '🇹🇷 TURQUÍA',     cls: 'chip-red'    },
-  WAIT:        { label: '⏳ ESPERÁ',        cls: 'chip-yellow' },
-  SIMILAR:     { label: '⚖️ SIMILAR',       cls: 'chip-gray'   },
-  TURKEY_ONLY: { label: '🇹🇷 Solo Turquía', cls: 'chip-gray'   },
-  NO_DATA:     { label: '❓ Sin datos',     cls: 'chip-gray'   },
+  BUY_AR:      { label: '✅ Comprá vos', cls: 'chip-green'  },
+  BUY_TURKEY:  { label: '🇹🇷 Turquía',   cls: 'chip-red'    },
+  WAIT:        { label: '⏳ Esperá',      cls: 'chip-yellow' },
+  SIMILAR:     { label: '⚖️ Similar',     cls: 'chip-gray'   },
+  TURKEY_ONLY: { label: '🇹🇷 Solo TK',   cls: 'chip-gray'   },
+  NO_DATA:     { label: '❓ Sin datos',   cls: 'chip-gray'   },
 };
 
 function fmt(n) { return n != null ? `$${Number(n).toFixed(2)}` : '—'; }
@@ -72,6 +72,17 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
   return (
     <div className="bulk-table-wrap">
       <table className="bulk-table">
+        <colgroup>
+          <col className="col-name" />
+          <col className="col-ps" />
+          <col className="col-real" />
+          <col className="col-turkey" />
+          <col className="col-saving" />
+          <col className="col-verdict" />
+          <col className="col-min" />
+          <col className="col-sale" />
+          <col className="col-lang" />
+        </colgroup>
         <thead>
           <tr>
             {th('game_name',    'Juego')}
@@ -81,8 +92,8 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
             {th('_saving',      'Ahorro')}
             {th('_verdict',     'Veredicto')}
             {th('min_hist_usd', 'Mín. real', { textAlign: 'right' })}
-            {th('ps_sale_end',  'Oferta hasta', { textAlign: 'center' })}
-            <th style={{ textAlign: 'center' }}>Idioma</th>
+            {th('ps_sale_end',  'Fin oferta', { textAlign: 'center' })}
+            <th style={{ textAlign: 'center' }}>ES</th>
           </tr>
         </thead>
         <tbody>
@@ -93,16 +104,14 @@ export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
 
             return (
               <tr key={r.id || i}>
-                <td style={{ fontWeight: 600, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <td style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.game_name}>
                   {r.ps_detail_url
-                    ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer">{r.game_name}</a>
+                    ? <a href={r.ps_detail_url} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{r.game_name}</a>
                     : r.game_name}
                 </td>
-                <td>
-                  <span style={{ whiteSpace: 'nowrap' }}>
-                    {fmt(r.ps_price_usd)}
-                    {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 3 }}>-{r.ps_discount_pct}%</span>}
-                  </span>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  {fmt(r.ps_price_usd)}
+                  {r.ps_discount_pct > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 2 }}>-{r.ps_discount_pct}%</span>}
                 </td>
                 <td style={{ color: 'var(--primary-h)', fontWeight: 700 }}>{fmt(r._realCost)}</td>
                 <td>
