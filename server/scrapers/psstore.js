@@ -151,9 +151,11 @@ function baseTitle(name) {
     // Remove "- 100 FC Points" style DLC suffixes
     .replace(/\s*[-–]\s*[\d,]+\s*(fc|vc|points?|coins?|gold|credits?).*$/i, '')
     // Remove platform suffix: "para PS4 y PS5" / "for PS4 & PS5"
-    .replace(/\s*(para|for)\s+ps[45]\s*(y|and|&)?\s*ps[45].*/i, '')
-    // Remove trailing "PS4" / "PS5" / "PS4™" / "PS4/PS5"
-    .replace(/\s+ps[45](™|\s*\/\s*ps[45])?(\s*™)?\s*$/i, '')
+    .replace(/\s*(para|for)\s+ps[45]™?\s*(y|and|&)?\s*ps[45].*/i, '')
+    // Remove parenthesized platform suffix: "(PS4™ & PS5™)" / "(PS4/PS5)"
+    .replace(/\s*\(ps[45]™?(\s*(\/|&|,)\s*ps[45]™?|\s+(and|y)\s+ps[45]™?)?\)\s*$/i, '')
+    // Remove trailing "PS4" / "PS5" / "PS4™" / "PS4/PS5" / "PS4 & PS5" / "PS4 and PS5" / "PS4 y PS5"
+    .replace(/\s+ps[45]™?(\s*(\/|&|,)\s*ps[45]™?|\s+(and|y)\s+ps[45]™?)?\s*$/i, '')
     // Remove Spanish edition: "Edición Estándar / Ultimate / Deluxe..."
     .replace(/\s+(edici[oó]n)\s+\S+.*/i, '')
     // Remove English edition suffixes with optional dash/colon prefix

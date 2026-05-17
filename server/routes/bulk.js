@@ -46,10 +46,12 @@ router.get('/', (req, res) => {
 
   // Enrich rows with PlatPrices cache data (keyed by catalog_name)
   // Load the entire cache once and join in JS — avoids a complex LEFT JOIN
+  // Also use PlatPrices sale_price_usd to correct min_hist_usd for existing rows
+  // (fixes DLC-contaminated minimums and adds external historical price data)
   let ppMap = {};
   try {
     const ppRows = db.prepare(
-      'SELECT game_name, last_discounted, discount_until, discount_pct FROM platprices_cache'
+      'SELECT game_name, last_discounted, discount_until, discount_pct, sale_price_usd FROM platprices_cache'
     ).all();
     for (const r of ppRows) ppMap[r.game_name.toLowerCase()] = r;
   } catch (_) {}
@@ -58,8 +60,19 @@ router.get('/', (req, res) => {
     const key = (r.catalog_name || r.game_name || '').toLowerCase();
     const pp  = ppMap[key];
     if (!pp) return r;
+
+    // Correct min_hist_usd: use PlatPrices sale price if it's lower (or if we have none)
+    let minHistUsd = r.min_hist_usd;
+    if (pp.sale_price_usd != null) {
+      // Only replace if PlatPrices is better OR if existing min looks contaminated (< $1)
+      if (minHistUsd == null || minHistUsd < 1.0 || pp.sale_price_usd < minHistUsd) {
+        minHistUsd = pp.sale_price_usd;
+      }
+    }
+
     return {
       ...r,
+      min_hist_usd:       minHistUsd,
       pp_last_discounted: pp.last_discounted,
       pp_discount_until:  pp.discount_until,
       pp_discount_pct:    pp.discount_pct,

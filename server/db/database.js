@@ -130,6 +130,10 @@ function _migrate(db) {
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
 
+  // One-time cleanup: remove DLC-contaminated sub-$1 price records from psstore-us scrapes
+  // (DLC items like "FC Points 100" @ $0.99 were previously recorded under catalog game names)
+  try { db.exec("DELETE FROM price_history WHERE source = 'psstore-us' AND price_usd IS NOT NULL AND price_usd < 1.0"); } catch (_) {}
+
   // Default settings
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('gift_card_rate', '0.72');
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('ars_to_usd', process.env.ARS_TO_USD || '1200');
@@ -292,11 +296,21 @@ function recordPrice(gameName, source, priceUsd, opts = {}) {
 }
 
 function getMinHistoricalPrice(gameName) {
-  // Include prices from our own PS Store scrapes (psstore-us) in addition to psdeals data
-  const row = getDb().prepare(
-    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd IS NOT NULL"
+  const db = getDb();
+
+  // Own scrape history — use price_usd > 1 to exclude DLC-contaminated sub-$1 records
+  // (e.g. "FC Points 100" @ $0.99 mistakenly recorded under a catalog game name)
+  const histRow = db.prepare(
+    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd > 1"
   ).get(gameName);
-  return row?.min ?? null;
+
+  // PlatPrices best-ever sale price — authoritative external historical data
+  const ppRow = db.prepare(
+    'SELECT sale_price_usd FROM platprices_cache WHERE game_name = ? AND sale_price_usd IS NOT NULL'
+  ).get(gameName);
+
+  const candidates = [histRow?.min, ppRow?.sale_price_usd].filter(v => v != null);
+  return candidates.length ? Math.min(...candidates) : null;
 }
 
 // Returns price history suitable for a chart: one point per unique date (cheapest that day)
