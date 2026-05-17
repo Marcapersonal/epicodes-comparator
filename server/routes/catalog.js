@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const { getCatalog, addToCatalog, removeFromCatalog } = require('../db/database');
+const { getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang } = require('../db/database');
 
 router.get('/', (_req, res) => {
   const games = getCatalog();
@@ -16,6 +16,12 @@ router.post('/', (req, res) => {
 
 router.delete('/:id', (req, res) => {
   removeFromCatalog(req.params.id);
+  res.json({ ok: true });
+});
+
+router.put('/:id/lang', (req, res) => {
+  const { spanishAudio, spanishText } = req.body;
+  updateCatalogLang(req.params.id, spanishAudio, spanishText);
   res.json({ ok: true });
 });
 

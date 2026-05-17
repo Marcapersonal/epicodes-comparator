@@ -10,7 +10,8 @@ const watchlistRoutes = require('./routes/watchlist');
 const settingsRoutes = require('./routes/settings');
 const alertsRoutes   = require('./routes/alerts');
 const historyRoutes  = require('./routes/history');
-const catalogRoutes  = require('./routes/catalog');
+const catalogRoutes   = require('./routes/catalog');
+const gameinfoRoutes  = require('./routes/gameinfo');
 const { startCron }  = require('./services/cronService');
 
 const app  = express();
@@ -30,6 +31,7 @@ app.use('/api/settings',  settingsRoutes);
 app.use('/api/alerts',    alertsRoutes);
 app.use('/api/history',   historyRoutes);
 app.use('/api/catalog',   catalogRoutes);
+app.use('/api/game-info', gameinfoRoutes);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 

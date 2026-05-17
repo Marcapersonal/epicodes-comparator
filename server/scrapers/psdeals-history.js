@@ -16,18 +16,30 @@ const LAUNCH_OPTS = {
   ],
 };
 
-// Search PSDeals AR store for a game, return the detail page URL
+// Search PSDeals US store for a game, return the detail page URL
 async function findGameUrl(page, gameName) {
-  const url = `${BASE}/ar-store/search?search_query=${encodeURIComponent(gameName)}`;
+  const url = `${BASE}/us-store/search?search_query=${encodeURIComponent(gameName)}`;
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForSelector('.game-collection-item', { timeout: 12000 }).catch(() => {});
 
+  // PSDeals renders results via JS — wait for either the game cards or a "no results" indicator
+  await Promise.race([
+    page.waitForSelector('a[href*="/us-store/game/"]', { timeout: 15000 }),
+    page.waitForSelector('.game-collection-item',      { timeout: 15000 }),
+    page.waitForTimeout(8000),
+  ]).catch(() => {});
+
+  // Try direct link selector first
+  const directHref = await page.evaluate(() => {
+    const a = document.querySelector('a[href*="/us-store/game/"]');
+    return a?.href || null;
+  });
+  if (directHref) return directHref;
+
+  // Fallback: cheerio parse
   const html = await page.content();
   const $    = cheerio.load(html);
-
   const href = $('.game-collection-item').first()
-    .find('.game-collection-item-link, a').first().attr('href');
-
+    .find('.game-collection-item-link, a[href*="/game/"]').first().attr('href');
   if (!href) return null;
   return href.startsWith('http') ? href : `${BASE}${href}`;
 }

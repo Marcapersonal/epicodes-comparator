@@ -167,12 +167,24 @@ async function runBulkScrape(batchId) {
       giftCardRate,
     });
 
-    const editionsJson = JSON.stringify(variants.map(v => ({
-      title:     v.name || v.title,
-      priceUsd:  v.priceUsd,
-      discount:  v.discountPct || v.discount || 0,
-      detailUrl: v.detailUrl,
-    })));
+    // For each PS Store edition, find the closest Turkey edition by fuzzy-matching
+    // the specific variant name (not just the catalog game name).
+    // Use a slightly stricter threshold (0.40) to avoid cross-edition mismatches.
+    const fuseEdition = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.40 });
+    const editionsJson = JSON.stringify(variants.map(v => {
+      const vTitle = v.name || v.title || '';
+      const vHits  = fuseEdition.search(vTitle);
+      const vTurkey = vHits.length ? vHits[0].item : null;
+      return {
+        title:          vTitle,
+        priceUsd:       v.priceUsd,
+        discount:       v.discountPct || v.discount || 0,
+        detailUrl:      v.detailUrl,
+        turkeyPriceUsd: b(vTurkey?.priceUsd) ?? null,
+        turkeyUrl:      vTurkey?.url ?? null,
+        turkeyTitle:    vTurkey?.title ?? null,
+      };
+    }));
 
     rows.push([
       b(batchId),

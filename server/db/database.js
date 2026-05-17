@@ -104,6 +104,8 @@ function _migrate(db) {
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_original_price_usd REAL'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_detail_url TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN editions_json TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
+  try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
 
   // Default settings
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('gift_card_rate', '0.72');
@@ -267,16 +269,38 @@ function recordPrice(gameName, source, priceUsd, opts = {}) {
 }
 
 function getMinHistoricalPrice(gameName) {
+  // Include prices from our own PS Store scrapes (psstore-us) in addition to psdeals data
   const row = getDb().prepare(
-    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source = 'psdeals' AND price_usd IS NOT NULL"
+    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd IS NOT NULL"
   ).get(gameName);
   return row?.min ?? null;
 }
 
+// Returns price history suitable for a chart: one point per unique date (cheapest that day)
 function getPriceDetailHistory(gameName) {
-  return getDb().prepare(
+  // Prefer ps_price_history_detail (psdeals chart data) when available
+  const detail = getDb().prepare(
     'SELECT price_usd, date_label, recorded_at FROM ps_price_history_detail WHERE game_name = ? ORDER BY recorded_at ASC'
   ).all(gameName);
+  if (detail.length > 0) return detail;
+
+  // Fallback: build history from our own bulk-refresh price_history records
+  const rows = getDb().prepare(
+    "SELECT price_usd, scraped_at FROM price_history WHERE game_name = ? AND source = 'psstore-us' AND price_usd IS NOT NULL ORDER BY scraped_at ASC"
+  ).all(gameName);
+  if (!rows.length) return [];
+
+  // Deduplicate by date — keep cheapest price per day
+  const byDate = {};
+  for (const r of rows) {
+    const day = r.scraped_at.slice(0, 10);
+    if (!byDate[day] || r.price_usd < byDate[day]) byDate[day] = r.price_usd;
+  }
+  return Object.entries(byDate).map(([day, price]) => ({
+    price_usd:  price,
+    date_label: day,
+    recorded_at: day,
+  }));
 }
 
 function savePriceDetailHistory(gameName, points) {
@@ -294,8 +318,9 @@ function savePriceDetailHistory(gameName, points) {
 }
 
 function detectSaleDates(gameName) {
+  // Include our own scrape data for sale detection, not just psdeals
   return getDb().prepare(
-    "SELECT scraped_at, price_usd FROM price_history WHERE game_name = ? AND source = 'psdeals' AND discount_pct > 0 ORDER BY scraped_at ASC"
+    "SELECT scraped_at, price_usd FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND discount_pct > 0 ORDER BY scraped_at ASC"
   ).all(gameName).map(r => ({ date: r.scraped_at.slice(0, 10), price: r.price_usd }));
 }
 
@@ -320,4 +345,9 @@ function removeFromCatalog(id) {
   getDb().prepare('UPDATE catalog SET active=0 WHERE id=?').run(id);
 }
 
-module.exports = { getDb, getSetting, setSetting, getGiftCardRate, getArsToUsd, recordPrice, getMinHistoricalPrice, getPriceDetailHistory, savePriceDetailHistory, detectSaleDates, getCatalog, addToCatalog, removeFromCatalog };
+function updateCatalogLang(id, spanishAudio, spanishText) {
+  getDb().prepare('UPDATE catalog SET spanish_audio=?, spanish_text=? WHERE id=?')
+    .run(spanishAudio ? 1 : 0, spanishText ? 1 : 0, id);
+}
+
+module.exports = { getDb, getSetting, setSetting, getGiftCardRate, getArsToUsd, recordPrice, getMinHistoricalPrice, getPriceDetailHistory, savePriceDetailHistory, detectSaleDates, getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang };

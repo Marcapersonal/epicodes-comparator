@@ -45,6 +45,7 @@ export const api = {
   getCatalog:       ()     => apiFetch('/catalog'),
   addToCatalog:     (name) => apiFetch('/catalog', { method: 'POST', body: JSON.stringify({ name }) }),
   removeFromCatalog:(id)   => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
+  updateCatalogLang:(id, spanishAudio, spanishText) => apiFetch(`/catalog/${id}/lang`, { method: 'PUT', body: JSON.stringify({ spanishAudio, spanishText }) }),
 };
 
 export function createProgressStream(batchId, onMessage) {

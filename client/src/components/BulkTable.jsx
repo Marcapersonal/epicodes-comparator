@@ -12,26 +12,42 @@ const VERDICT_CHIPS = {
 
 function fmt(n) { return n != null ? `$${Number(n).toFixed(2)}` : '—'; }
 
-export default function BulkTable({ rows, giftCardRate }) {
+function LangBadge({ spanishAudio, spanishText, notSet }) {
+  if (notSet) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>No marcado</span>;
+  if (!spanishAudio && !spanishText) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>Sin español</span>;
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, fontSize: 12 }}>
+      {spanishAudio && <span title="Audio en español" style={{ background: 'rgba(0,200,83,.15)', color: 'var(--green)', padding: '2px 7px', borderRadius: 10, fontWeight: 600 }}>🎙️ Audio</span>}
+      {spanishText  && <span title="Texto/subtítulos en español" style={{ background: 'rgba(100,160,255,.15)', color: '#6ab0ff', padding: '2px 7px', borderRadius: 10, fontWeight: 600 }}>📝 Texto</span>}
+    </span>
+  );
+}
+
+// langMap: { [game_name_lowercase]: { id, spanishAudio, spanishText } }
+export default function BulkTable({ rows, giftCardRate, langMap = {} }) {
   const [sortKey,  setSortKey]  = useState('saving_usd');
   const [sortAsc,  setSortAsc]  = useState(false);
   const [expanded, setExpanded] = useState(null);
 
   // Live-recalculate real cost and verdict with current giftCardRate
   const computed = useMemo(() => rows.map(r => {
-    const realCost = calcRealCost(r.ps_price_usd, giftCardRate);
-    const verdict  = getVerdict(realCost, r.turkey_price, { giftCardRate });
-    const saving   = verdict.saving || 0;
-    return { ...r, _realCost: realCost, _verdict: verdict, _saving: saving };
+    const realCost    = calcRealCost(r.ps_price_usd, giftCardRate);
+    const verdict     = getVerdict(realCost, r.turkey_price, { giftCardRate });
+    const saving      = verdict.saving || 0;
+    // _verdictType is a plain string for sorting
+    return { ...r, _realCost: realCost, _verdict: verdict, _saving: saving, _verdictType: verdict.type };
   }), [rows, giftCardRate]);
 
   const sorted = useMemo(() => {
     const clone = [...computed];
     clone.sort((a, b) => {
-      let va = a[sortKey] ?? a[`_${sortKey}`] ?? 0;
-      let vb = b[sortKey] ?? b[`_${sortKey}`] ?? 0;
+      // For verdict, sort by type string; for others use numeric or string comparison
+      let va = sortKey === '_verdict' ? a._verdictType : (a[sortKey] ?? a[`_${sortKey}`] ?? 0);
+      let vb = sortKey === '_verdict' ? b._verdictType : (b[sortKey] ?? b[`_${sortKey}`] ?? 0);
       if (typeof va === 'string') va = va.toLowerCase();
       if (typeof vb === 'string') vb = vb.toLowerCase();
+      if (va == null) va = sortAsc ? 'zzz' : '';
+      if (vb == null) vb = sortAsc ? 'zzz' : '';
       return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
     });
     return clone;
@@ -66,10 +82,20 @@ export default function BulkTable({ rows, giftCardRate }) {
             const chip = VERDICT_CHIPS[r._verdict.type] || VERDICT_CHIPS.NO_DATA;
             const isOpen = expanded === i;
 
-            // Parse editions_json if present
+            // Parse editions_json — filter out currency packs (FC Points, VC, etc.)
             let editions = [];
             if (r.editions_json) {
-              try { editions = JSON.parse(r.editions_json); } catch (_) {}
+              try {
+                const all = JSON.parse(r.editions_json);
+                editions = all.filter(ed => {
+                  const n = ed.title || '';
+                  if (/\b(fc|vc)\s+points?\b/i.test(n)) return false;
+                  if (/\bpoints?\s+[\d,]+/i.test(n)) return false;
+                  if (/-\s*[\d,]+\s*(fc|vc|coins?|points?)\b/i.test(n)) return false;
+                  if (/\b(points?|coins?)\s*$/i.test(n)) return false;
+                  return true;
+                });
+              } catch (_) {}
             }
 
             return (
@@ -105,45 +131,80 @@ export default function BulkTable({ rows, giftCardRate }) {
                         <div>Costo al mínimo: <b style={{ color: 'var(--primary-h)' }}>{calcRealCost(r.min_hist_usd, giftCardRate) ? fmt(calcRealCost(r.min_hist_usd, giftCardRate)) : '—'}</b></div>
                         <div>Fin de oferta: <b style={{ color: 'var(--yellow)' }}>{r.ps_sale_end || '—'}</b></div>
                         <div>Tasa usada: <b style={{ color: 'var(--text)' }}>{giftCardRate.toFixed(2)}</b></div>
+                        <div style={{ gridColumn: '1/-1', marginTop: 4 }}>
+                          {(() => {
+                            const lang = langMap[r.game_name?.toLowerCase()];
+                            return <>Idioma español: <LangBadge spanishAudio={lang?.spanishAudio} spanishText={lang?.spanishText} notSet={!lang} /></>;
+                          })()}
+                        </div>
                         <div style={{ gridColumn: '1/-1', marginTop: 4 }}><i>{r._verdict.sublabel || ''}</i></div>
                       </div>
 
-                      {editions.length > 1 && (
+                      {editions.length > 0 && (
                         <div style={{ marginTop: 10 }}>
                           <div style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-                            Ediciones disponibles — PS Store US
+                            Comparación por edición — PS Store US vs Turquía
+                          </div>
+                          {/* Column headers */}
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 90px 90px 90px', gap: '0 6px', padding: '2px 10px 6px', fontSize: 10, color: 'var(--dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            <span>Edición</span>
+                            <span style={{ textAlign: 'right' }}>PS Store</span>
+                            <span style={{ textAlign: 'right' }}>Real (×{giftCardRate.toFixed(2)})</span>
+                            <span style={{ textAlign: 'right' }}>Turquía</span>
+                            <span style={{ textAlign: 'right' }}>Ahorro</span>
                           </div>
                           {editions.map((ed, ei) => {
-                            const edCost = calcRealCost(ed.priceUsd, giftCardRate);
+                            const edCost   = calcRealCost(ed.priceUsd, giftCardRate);
+                            const tPrice   = ed.turkeyPriceUsd ?? null;
+                            const saving   = edCost != null && tPrice != null ? tPrice - edCost : null;
+                            const psWins   = saving != null && saving > 0.5;
+                            const tWins    = saving != null && saving < -0.5;
                             const isCheapest = ei === 0;
                             return (
                               <div
                                 key={ed.title || ei}
                                 style={{
-                                  display: 'flex', alignItems: 'center', gap: 8,
-                                  padding: '5px 10px', marginBottom: 4, borderRadius: 6,
-                                  background: isCheapest ? 'rgba(0,200,83,.08)' : 'rgba(255,255,255,.03)',
-                                  border: isCheapest ? '1px solid rgba(0,200,83,.25)' : '1px solid rgba(255,255,255,.06)',
+                                  display: 'grid', gridTemplateColumns: '1fr 90px 90px 90px 90px', gap: '0 6px',
+                                  alignItems: 'center', padding: '5px 10px', marginBottom: 3, borderRadius: 6,
+                                  background: isCheapest && psWins ? 'rgba(0,200,83,.07)'
+                                            : tWins ? 'rgba(220,50,50,.06)' : 'rgba(255,255,255,.03)',
+                                  border: isCheapest && psWins ? '1px solid rgba(0,200,83,.2)'
+                                        : tWins ? '1px solid rgba(220,50,50,.15)' : '1px solid rgba(255,255,255,.05)',
                                 }}
                               >
-                                <div style={{ flex: 1, fontSize: 12, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
-                                  {isCheapest && <span style={{ fontSize: 10, marginRight: 5 }}>★</span>}
+                                {/* Edition name */}
+                                <div style={{ fontSize: 12, color: 'var(--text)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {isCheapest && <span style={{ fontSize: 10, color: 'var(--green)', marginRight: 4 }}>★</span>}
                                   {ed.detailUrl
                                     ? <a href={ed.detailUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit', textDecoration: 'none' }}>{ed.title}</a>
                                     : ed.title}
                                 </div>
-                                <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                                  <span style={{ fontWeight: 700, fontSize: 13, color: isCheapest ? 'var(--green)' : 'var(--text)' }}>
-                                    {fmt(ed.priceUsd)}
-                                  </span>
-                                  {ed.discount > 0 && (
-                                    <span style={{ color: 'var(--green)', fontSize: 11, marginLeft: 5 }}>-{ed.discount}%</span>
-                                  )}
-                                  {edCost != null && (
-                                    <span style={{ color: 'var(--muted)', fontSize: 11, marginLeft: 6 }}>
-                                      → {fmt(edCost)} real
-                                    </span>
-                                  )}
+                                {/* PS Store price */}
+                                <div style={{ textAlign: 'right', fontSize: 12, fontWeight: 600 }}>
+                                  {fmt(ed.priceUsd)}
+                                  {ed.discount > 0 && <span style={{ color: 'var(--green)', fontSize: 10, marginLeft: 3 }}>-{ed.discount}%</span>}
+                                </div>
+                                {/* Real cost */}
+                                <div style={{ textAlign: 'right', fontSize: 12, color: psWins ? 'var(--green)' : 'var(--primary-h)', fontWeight: psWins ? 700 : 400 }}>
+                                  {fmt(edCost)}
+                                </div>
+                                {/* Turkey price */}
+                                <div style={{ textAlign: 'right', fontSize: 12, color: tWins ? 'var(--red)' : 'var(--muted)' }}>
+                                  {tPrice != null
+                                    ? (ed.turkeyUrl
+                                      ? <a href={ed.turkeyUrl} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ color: 'inherit' }}>{fmt(tPrice)}</a>
+                                      : fmt(tPrice))
+                                    : <span style={{ color: 'var(--dim)' }}>—</span>}
+                                </div>
+                                {/* Saving */}
+                                <div style={{ textAlign: 'right', fontSize: 11, fontWeight: 600 }}>
+                                  {saving != null
+                                    ? saving > 0.5
+                                      ? <span style={{ color: 'var(--green)' }}>+{fmt(saving)}</span>
+                                      : saving < -0.5
+                                        ? <span style={{ color: 'var(--red)' }}>🇹🇷 {fmt(Math.abs(saving))}</span>
+                                        : <span style={{ color: 'var(--dim)' }}>≈</span>
+                                    : <span style={{ color: 'var(--dim)' }}>—</span>}
                                 </div>
                               </div>
                             );

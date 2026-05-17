@@ -4,12 +4,12 @@ import BulkTable  from './BulkTable.jsx';
 import ResultCard from './ResultCard.jsx';
 
 const FILTER_OPTIONS = [
-  { value: 'ALL',          label: 'Todos' },
-  { value: 'BUY_AR',       label: '✅ Comprá vos' },
-  { value: 'BUY_TURKEY',   label: '🇹🇷 Comprá en Turquía' },
-  { value: 'WAIT',         label: '⏳ Esperá la oferta' },
-  { value: 'SIMILAR',      label: '⚖️ Precio similar' },
-  { value: 'TURKEY_ONLY',  label: '🇹🇷 Solo en Turquía' },
+  { value: 'ALL',        label: 'Todos' },
+  { value: 'BUY_AR',     label: '✅ Comprá vos' },
+  { value: 'BUY_TURKEY', label: '🇹🇷 Comprá en Turquía' },
+  { value: 'WAIT',       label: '⏳ Esperá la oferta' },
+  { value: 'SIMILAR',    label: '⚖️ Precio similar' },
+  { value: 'NO_DATA',    label: '❓ Sin precio PS Store' },
 ];
 
 export default function BulkTab({ giftCardRate, showToast }) {
@@ -105,6 +105,19 @@ export default function BulkTab({ giftCardRate, showToast }) {
     }
   }
 
+  async function handleLangToggle(game, field) {
+    const newVal = !game[field];
+    const updated = { ...game, [field]: newVal };
+    setCatalog(prev => prev.map(g => g.id === game.id ? updated : g));
+    try {
+      await api.updateCatalogLang(game.id, updated.spanish_audio, updated.spanish_text);
+    } catch (err) {
+      // Revert on error
+      setCatalog(prev => prev.map(g => g.id === game.id ? game : g));
+      showToast?.(`Error: ${err.message}`);
+    }
+  }
+
   // ── Bulk refresh ────────────────────────────────────────────────────────────
   function listenProgress(batchId) {
     closeStream.current?.();
@@ -186,6 +199,15 @@ export default function BulkTab({ giftCardRate, showToast }) {
     setSearchError('');
   }
 
+  // Build langMap from catalog for fast O(1) lookup in BulkTable
+  const langMap = useMemo(() => {
+    const m = {};
+    for (const g of catalog) {
+      m[g.name.toLowerCase()] = { id: g.id, spanishAudio: !!g.spanish_audio, spanishText: !!g.spanish_text };
+    }
+    return m;
+  }, [catalog]);
+
   // Client-side filter: if there's text in the search bar but no committed
   // query yet, filter the bulk table rows by game_name
   const tableFilter = searchInput.trim() && !searchQuery
@@ -218,10 +240,14 @@ export default function BulkTab({ giftCardRate, showToast }) {
             className="btn btn-secondary"
             onClick={handleLoadHistory}
             disabled={histRunning || running}
-            title={histStats ? `${histStats.gamesWithHistory}/${histStats.totalGames} juegos con historial. Último: ${histStats.lastCompleted ? new Date(histStats.lastCompleted).toLocaleDateString('es-AR') : 'nunca'}` : 'Cargar historial de precios desde PSDeals'}
+            title={
+              histStats
+                ? `${histStats.gamesWithHistory}/${histStats.totalGames} juegos con datos de precio. El historial crece automáticamente con cada actualización del listado.`
+                : 'Ver estadísticas de historial de precios'
+            }
           >
             {histRunning
-              ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Cargando historial...</>
+              ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Calculando...</>
               : <>📊 Historial{histStats ? ` (${histStats.gamesWithHistory}/${histStats.totalGames})` : ''}</>}
           </button>
           <button className="btn btn-primary" onClick={handleRefresh} disabled={running || histRunning}>
@@ -252,13 +278,40 @@ export default function BulkTab({ giftCardRate, showToast }) {
               {addLoading ? <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> : 'Agregar'}
             </button>
           </form>
-          <div style={{ maxHeight: 300, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+            Marcá el soporte de español para cada juego — se guarda automáticamente.
+          </div>
+          <div style={{ maxHeight: 380, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>
             {catalog.map(g => (
-              <div key={g.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 8px', borderRadius: 4, background: 'rgba(255,255,255,.03)' }}>
-                <span style={{ fontSize: 13 }}>{g.name}</span>
+              <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', borderRadius: 4, background: 'rgba(255,255,255,.03)' }}>
+                <span style={{ flex: 1, fontSize: 12 }}>{g.name}</span>
+                <button
+                  onClick={() => handleLangToggle(g, 'spanish_audio')}
+                  title="Audio en español"
+                  style={{
+                    background: g.spanish_audio ? 'rgba(0,200,83,.2)' : 'rgba(255,255,255,.05)',
+                    border: g.spanish_audio ? '1px solid rgba(0,200,83,.4)' : '1px solid rgba(255,255,255,.1)',
+                    color: g.spanish_audio ? 'var(--green)' : 'var(--dim)',
+                    borderRadius: 8, padding: '2px 8px', fontSize: 11, cursor: 'pointer', fontWeight: 600,
+                  }}
+                >
+                  🎙️
+                </button>
+                <button
+                  onClick={() => handleLangToggle(g, 'spanish_text')}
+                  title="Texto/subtítulos en español"
+                  style={{
+                    background: g.spanish_text ? 'rgba(100,160,255,.2)' : 'rgba(255,255,255,.05)',
+                    border: g.spanish_text ? '1px solid rgba(100,160,255,.4)' : '1px solid rgba(255,255,255,.1)',
+                    color: g.spanish_text ? '#6ab0ff' : 'var(--dim)',
+                    borderRadius: 8, padding: '2px 8px', fontSize: 11, cursor: 'pointer', fontWeight: 600,
+                  }}
+                >
+                  📝
+                </button>
                 <button
                   onClick={() => handleRemoveFromCatalog(g.id, g.name)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 16, padding: '0 4px', lineHeight: 1 }}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 14, padding: '0 2px', lineHeight: 1 }}
                   title="Eliminar del catálogo"
                 >
                   ✕
@@ -328,7 +381,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
       {histRunning && histProgress && (
         <div className="card" style={{ marginBottom: 14, borderColor: 'rgba(255,193,7,.4)' }}>
           <div style={{ fontSize: 12, color: 'var(--yellow)', marginBottom: 6, fontWeight: 600 }}>
-            📊 Cargando historial de precios desde PSDeals
+            📊 Estadísticas de historial de precios
           </div>
           <div className="progress-bar-wrap">
             <div className="progress-bar" style={{ width: `${histProgress.progress || 0}%`, background: 'var(--yellow)' }} />
@@ -389,7 +442,7 @@ export default function BulkTab({ giftCardRate, showToast }) {
       )}
 
       {results.length > 0 && (
-        <BulkTable rows={results} giftCardRate={giftCardRate} />
+        <BulkTable rows={results} giftCardRate={giftCardRate} langMap={langMap} />
       )}
     </div>
   );

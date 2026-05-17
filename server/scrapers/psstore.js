@@ -119,12 +119,21 @@ function parseSearchResults(html) {
 //  Search a single game — returns best fuzzy match + all variants + US price
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Returns true for actual game listings (not DLC, points packs, etc.)
+// Returns true for actual game listings (not DLC, currency packs, etc.)
 function isGameListing(name) {
-  return !/-\s*[\d,]+(,\d{3})*\s*(fc|vc|gold|coins?|points?)\b/i.test(name) &&
-         !/\bpoints?\s*$/i.test(name) &&
-         !/\b(bundle|dlc|season\s+pass|add-?on)\b/i.test(name) &&
-         name.trim() !== '';
+  const n = name.trim();
+  if (!n) return false;
+  // "- 100 FC Points" / "- 1000 VC" style DLC suffixes
+  if (/-\s*[\d,]+(,\d{3})*\s*(fc|vc|gold|coins?|points?)\b/i.test(n)) return false;
+  // "FC Points 100", "FC Points 500" — currency in any position
+  if (/\b(fc|vc)\s+points?\b/i.test(n)) return false;
+  // "Points 100", "Points 1000" — points pack followed by a number
+  if (/\bpoints?\s+[\d,]+/i.test(n)) return false;
+  // Ends with "Points" or "Coins"
+  if (/\b(points?|coins?)\s*$/i.test(n)) return false;
+  // Explicit DLC markers
+  if (/\b(dlc|season\s+pass|add-?on)\b/i.test(n)) return false;
+  return true;
 }
 
 // Strip edition/platform suffixes to get a base title for grouping variants
@@ -168,10 +177,12 @@ async function searchPsStore(query) {
     const base = baseTitle(best.name);
     const allGameListings = usResults.filter(r => isGameListing(r.name));
     variants = allGameListings.filter(r => baseTitle(r.name) === base);
-    // Fallback: include close fuse hits (score < 0.4) if base-title grouping found nothing extra
+    // Fallback: include close fuse hits if base-title grouping found nothing extra.
+    // CRITICAL: only include hits whose baseTitle EXACTLY matches `base` —
+    // otherwise "God of War" would pull in "God of War Ragnarök" etc.
     if (variants.length <= 1) {
       const extras = usHits
-        .filter(h => h.score != null && h.score < 0.4 && h.item.priceUsd != null)
+        .filter(h => h.score != null && h.score < 0.4 && h.item.priceUsd != null && baseTitle(h.item.name) === base)
         .map(h => h.item);
       variants = extras.length > 1 ? extras : variants;
       if (!variants.find(v => v.name === best.name)) variants.unshift(best);
@@ -271,4 +282,4 @@ async function bulkLookup(titles, onProgress) {
   return results;
 }
 
-module.exports = { searchPsStoreUS, searchPsStoreAR, bulkLookup };
+module.exports = { searchPsStoreUS, searchPsStoreAR, bulkLookup, getHtml };

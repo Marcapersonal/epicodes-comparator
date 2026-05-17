@@ -49,16 +49,17 @@ router.get('/status', (_req, res) => {
     } catch (_) {}
   }
 
-  // Also return stats: how many games have history vs total
+  // Stats: count from both psdeals detail table and our own psstore-us records
   let stats = null;
   try {
     const total = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM bulk_results WHERE batch_id = (SELECT batch_id FROM bulk_results ORDER BY scraped_at DESC LIMIT 1)').get();
-    const withHistory = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM ps_price_history_detail').get();
+    const withPsdeals = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM ps_price_history_detail').get();
+    const withOwn     = db.prepare("SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'").get();
     const lastRun = db.prepare("SELECT value FROM settings WHERE key = 'history_last_completed'").get();
     stats = {
-      totalGames:   total?.n || 0,
-      gamesWithHistory: withHistory?.n || 0,
-      lastCompleted: lastRun?.value || null,
+      totalGames:       total?.n || 0,
+      gamesWithHistory: Math.max(withPsdeals?.n || 0, withOwn?.n || 0),
+      lastCompleted:    lastRun?.value || null,
     };
   } catch (_) {}
 
@@ -126,56 +127,33 @@ async function runHistoryFetch(jobId) {
   };
   const db = getDb();
 
-  const latest = db.prepare('SELECT batch_id FROM bulk_results ORDER BY scraped_at DESC LIMIT 1').get();
-  if (!latest) {
-    activeJob = { id: jobId, status: 'error', message: '❌ No hay datos bulk. Hacé un refresh primero.' };
-    broadcastProgress(jobId, activeJob);
-    clearPersistedJob();
-    return;
-  }
+  // History now builds automatically from every bulk refresh via price_history (source='psstore-us').
+  // This job just computes and reports what we already have.
+  emit({ message: 'Calculando estadísticas de historial...', progress: 30 });
 
-  const allGames = db.prepare(
-    'SELECT DISTINCT game_name FROM bulk_results WHERE batch_id = ?'
-  ).all(latest.batch_id).map(r => r.game_name);
+  const totalGames = db.prepare(
+    "SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'"
+  ).get()?.n || 0;
 
-  const toFetch = allGames.filter(name => {
-    const row = db.prepare('SELECT COUNT(*) as n FROM ps_price_history_detail WHERE game_name = ?').get(name);
-    return row.n === 0;
-  });
+  const totalPoints = db.prepare(
+    "SELECT COUNT(*) as n FROM price_history WHERE source='psstore-us'"
+  ).get()?.n || 0;
 
-  if (toFetch.length === 0) {
-    activeJob = { id: jobId, status: 'done', progress: 100, message: '✅ Todos los juegos ya tienen historial.', saved: 0 };
-    broadcastProgress(jobId, activeJob);
-    clearPersistedJob();
-    setTimeout(() => progressClients.delete(jobId), 30000);
-    return;
-  }
+  const oldestEntry = db.prepare(
+    "SELECT MIN(scraped_at) as d FROM price_history WHERE source='psstore-us'"
+  ).get()?.d;
 
-  emit({ message: `${toFetch.length} juegos sin historial. Buscando en PSDeals AR...`, progress: 2 });
-
-  const batchResults = await fetchHistoryBatch(toFetch, ({ done, total, current, saved }) => {
-    const pct = 2 + Math.round((done / total) * 93);
-    emit({ message: `${done}/${total} — ${current}`, progress: pct, saved });
-  });
-
-  let totalSaved = 0;
-  for (const { name, history } of batchResults) {
-    if (history.length > 0) {
-      try {
-        savePriceDetailHistory(name, history.map(h => ({ price: h.priceUsd, date: h.date })));
-        totalSaved++;
-      } catch (err) {
-        console.warn(`[history] save failed for ${name}:`, err.message);
-      }
-    }
-  }
+  const gamesWithMultiple = db.prepare(
+    "SELECT COUNT(*) as n FROM (SELECT game_name FROM price_history WHERE source='psstore-us' GROUP BY game_name HAVING COUNT(*) > 1)"
+  ).get()?.n || 0;
 
   const now = new Date().toISOString();
   try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
 
+  const since = oldestEntry ? oldestEntry.slice(0, 10) : '—';
   activeJob = {
-    id: jobId, status: 'done', progress: 100, saved: totalSaved,
-    message: `✅ Historial guardado — ${totalSaved}/${toFetch.length} juegos con datos`,
+    id: jobId, status: 'done', progress: 100, saved: gamesWithMultiple,
+    message: `📊 ${totalGames} juegos con datos desde ${since} — ${totalPoints} registros en total. El historial crece automáticamente con cada actualización del listado.`,
   };
   broadcastProgress(jobId, activeJob);
   clearPersistedJob();
