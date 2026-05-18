@@ -111,8 +111,9 @@ async function fetchHistoryBatch(gameNames, onProgress) {
     for (let i = 0; i < gameNames.length; i++) {
       const name = gameNames[i];
       let history = [];
+      let gameUrl = null;
       try {
-        const gameUrl = await findGameUrl(page, name);
+        gameUrl = await findGameUrl(page, name);
         if (gameUrl) {
           history = await extractHistory(page, gameUrl);
           if (history.length > 0) saved++;
@@ -120,7 +121,7 @@ async function fetchHistoryBatch(gameNames, onProgress) {
       } catch (err) {
         console.warn(`[history] ${name}: ${err.message}`);
       }
-      results.push({ name, history });
+      results.push({ name, history, gameUrl }); // include gameUrl for storage in game_catalog
       onProgress?.({ done: i + 1, total: gameNames.length, current: name, saved });
     }
   } finally {

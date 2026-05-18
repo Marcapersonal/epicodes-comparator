@@ -1,10 +1,19 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 
-export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
+const REGIONS = [
+  { value: 'AR', label: 'Argentina (es-ar)' },
+  { value: 'BR', label: 'Brasil (pt-br)' },
+  { value: 'IN', label: 'India (en-in)' },
+  { value: 'MX', label: 'México (es-mx)' },
+  { value: 'TR', label: 'Turquía (en-tr)' },
+];
+
+export default function SettingsTab({ giftCardRate, onRateChange, altRegion, onAltRegionChange, showToast }) {
   const [form, setForm] = useState({
     gift_card_rate: String(giftCardRate),
     ars_to_usd:     '1200',
+    alt_region:     altRegion || 'AR',
     smtp_host:      '',
     smtp_port:      '587',
     smtp_user:      '',
@@ -13,6 +22,7 @@ export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
     telegram_chat:  '',
   });
   const [saving, setSaving] = useState(false);
+  const [reSearching, setReSearching] = useState(false);
 
   useEffect(() => {
     api.getSettings().then(s => {
@@ -20,9 +30,10 @@ export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
         ...prev,
         gift_card_rate: String(s.gift_card_rate || 0.72),
         ars_to_usd:     String(s.ars_to_usd     || 1200),
-        smtp_user:      s.smtp_user      || '',
-        alert_email_to: s.alert_email_to || '',
-        telegram_chat:  s.telegram_chat  || '',
+        alt_region:     s.alt_region            || 'AR',
+        smtp_user:      s.smtp_user             || '',
+        alert_email_to: s.alert_email_to        || '',
+        telegram_chat:  s.telegram_chat         || '',
       }));
     }).catch(() => {});
   }, []); // eslint-disable-line
@@ -37,11 +48,24 @@ export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
     try {
       const res = await api.saveSettings(form);
       onRateChange(parseFloat(res.gift_card_rate));
+      if (res.alt_region && onAltRegionChange) onAltRegionChange(res.alt_region);
       showToast?.('✅ Configuración guardada');
     } catch (err) {
       showToast?.(`Error: ${err.message}`);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleReSearchAltRegion() {
+    setReSearching(true);
+    try {
+      await api.reSearchAltRegion();
+      showToast?.(`🔄 Buscando links de región ${form.alt_region} en background...`);
+    } catch (err) {
+      showToast?.(`Error: ${err.message}`);
+    } finally {
+      setTimeout(() => setReSearching(false), 3000);
     }
   }
 
@@ -66,6 +90,38 @@ export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
           <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>
             Ejemplo: si 1 USD = 1200 ARS, escribí 1200
           </div>
+        </div>
+      </div>
+
+      {/* ── Región alternativa ────────────────────────────────────── */}
+      <div className="card settings-section">
+        <div className="settings-label">🌍 Región Alternativa de PS Store</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 12 }}>
+          Se muestra una columna extra en la tabla con el precio de esta región.
+          Usá Argentina para comparar con ARS, Brasil o India para otras monedas.
+        </div>
+        <div className="settings-field">
+          <label>Región alternativa</label>
+          <select className="settings-input" {...field('alt_region')}>
+            {REGIONS.map(r => (
+              <option key={r.value} value={r.value}>{r.label}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          className="btn btn-outline"
+          onClick={handleReSearchAltRegion}
+          disabled={reSearching}
+          style={{ marginTop: 8 }}
+          title="Busca los links de PS Store en la región seleccionada para todos los juegos del catálogo (corre en background)"
+        >
+          {reSearching
+            ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} /> Buscando...</>
+            : `🔄 Re-buscar links de región alternativa`}
+        </button>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+          Nota: corre en background, puede tardar varios minutos según el tamaño del catálogo.
         </div>
       </div>
 
@@ -109,8 +165,15 @@ export default function SettingsTab({ giftCardRate, onRateChange, showToast }) {
         </div>
       </div>
 
-      <button className="btn btn-primary" type="submit" disabled={saving} style={{ width: '100%', justifyContent: 'center', padding: '12px' }}>
-        {saving ? <><span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Guardando...</> : '💾 Guardar configuración'}
+      <button
+        className="btn btn-primary"
+        type="submit"
+        disabled={saving}
+        style={{ width: '100%', justifyContent: 'center', padding: '12px' }}
+      >
+        {saving
+          ? <><span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> Guardando...</>
+          : '💾 Guardar configuración'}
       </button>
     </form>
   );

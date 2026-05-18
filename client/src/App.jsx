@@ -10,13 +10,19 @@ const TABS = [
   { id: 'settings',  label: '⚙️ Configuración'    },
 ];
 
+const ALT_REGION_LABEL = { AR: 'AR', BR: 'BR', IN: 'IN', MX: 'MX', TR: 'TR' };
+
 export default function App() {
-  const [tab, setTab]               = useState('bulk');
+  const [tab,          setTab]          = useState('bulk');
   const [giftCardRate, setGiftCardRate] = useState(0.72);
-  const [toasts, setToasts]         = useState([]);
+  const [altRegion,    setAltRegion]    = useState('AR');
+  const [toasts,       setToasts]       = useState([]);
 
   useEffect(() => {
-    api.getSettings().then(s => setGiftCardRate(parseFloat(s.gift_card_rate) || 0.72)).catch(() => {});
+    api.getSettings().then(s => {
+      setGiftCardRate(parseFloat(s.gift_card_rate) || 0.72);
+      setAltRegion(s.alt_region || 'AR');
+    }).catch(() => {});
   }, []);
 
   const showToast = useCallback((msg) => {
@@ -25,7 +31,8 @@ export default function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }, []);
 
-  const onRateChange = useCallback((rate) => setGiftCardRate(rate), []);
+  const onRateChange      = useCallback((rate)   => setGiftCardRate(rate), []);
+  const onAltRegionChange = useCallback((region) => setAltRegion(region),  []);
 
   return (
     <>
@@ -34,7 +41,9 @@ export default function App() {
           <span className="app-logo">🎮</span>
           <div>
             <div className="app-title">Epicodes Price Comparator</div>
-            <div className="app-subtitle">PS Store AR · GamesturkeyACC · Tasa activa: {giftCardRate.toFixed(2)}</div>
+            <div className="app-subtitle">
+              Sony US · Sony {ALT_REGION_LABEL[altRegion] || altRegion} · GamesturkeyACC · Tasa: {giftCardRate.toFixed(2)}
+            </div>
           </div>
         </div>
         <nav className="tabs">
@@ -51,9 +60,9 @@ export default function App() {
       </header>
 
       <main className="main">
-        {tab === 'bulk'      && <BulkTab      giftCardRate={giftCardRate} showToast={showToast} />}
+        {tab === 'bulk'      && <BulkTab      giftCardRate={giftCardRate} altRegion={altRegion} showToast={showToast} />}
         {tab === 'watchlist' && <WatchlistTab giftCardRate={giftCardRate} showToast={showToast} />}
-        {tab === 'settings'  && <SettingsTab  giftCardRate={giftCardRate} onRateChange={onRateChange} showToast={showToast} />}
+        {tab === 'settings'  && <SettingsTab  giftCardRate={giftCardRate} onRateChange={onRateChange} altRegion={altRegion} onAltRegionChange={onAltRegionChange} showToast={showToast} />}
       </main>
 
       <div className="toast-wrap">

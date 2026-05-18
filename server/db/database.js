@@ -20,6 +20,8 @@ function _migrate(db) {
     PRAGMA journal_mode=WAL;
     PRAGMA foreign_keys=ON;
 
+    -- ── Legacy tables (kept for 2 weeks, then drop) ────────────────────────────
+
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -112,6 +114,52 @@ function _migrate(db) {
       fetched_at       TEXT NOT NULL
     );
 
+    -- ── NEW: game_catalog — the validated catalog with stored URLs ─────────────
+
+    CREATE TABLE IF NOT EXISTS game_catalog (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      parent_id             INTEGER NULL,
+      base_title            TEXT    NOT NULL,
+      edition               TEXT    NULL,
+      display_name          TEXT    NOT NULL,
+
+      sony_us_url           TEXT    NULL,
+      sony_alt_url          TEXT    NULL,
+      sony_alt_region       TEXT    NULL,
+      turkey_url            TEXT    NULL,
+
+      sony_us_confidence    INTEGER DEFAULT 0,
+      sony_alt_confidence   INTEGER DEFAULT 0,
+      turkey_confidence     INTEGER DEFAULT 0,
+
+      validated_at          TIMESTAMP NULL,
+      validated_by          TEXT    NULL,
+
+      is_full_game          BOOLEAN DEFAULT 1,
+      excluded              BOOLEAN DEFAULT 0,
+
+      last_error            TEXT    NULL,
+      last_error_at         TIMESTAMP NULL,
+
+      psdeals_url           TEXT    NULL,
+      psdeals_last_checked  TIMESTAMP NULL,
+      min_price_usd_alltime REAL    NULL,
+      min_price_date        DATE    NULL,
+      current_sale_price_usd  REAL  NULL,
+      current_sale_end_date   DATE  NULL,
+
+      spanish_audio         BOOLEAN DEFAULT 0,
+      spanish_text          BOOLEAN DEFAULT 0,
+
+      created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_game_catalog_base_title ON game_catalog(base_title);
+    CREATE INDEX IF NOT EXISTS idx_game_catalog_parent_id  ON game_catalog(parent_id);
+    CREATE INDEX IF NOT EXISTS idx_game_catalog_excluded   ON game_catalog(excluded);
+
+    -- Indexes on legacy tables
     CREATE INDEX IF NOT EXISTS idx_bulk_batch     ON bulk_results(batch_id);
     CREATE INDEX IF NOT EXISTS idx_ph_game        ON price_history(game_name);
     CREATE INDEX IF NOT EXISTS idx_pshd_game      ON ps_price_history_detail(game_name);
@@ -119,7 +167,7 @@ function _migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_pp_fetched     ON platprices_cache(fetched_at);
   `);
 
-  // Add new columns if they don't exist yet (safe to run on existing DBs)
+  // ── Legacy column additions (safe on existing DBs) ───────────────────────────
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN us_price_usd REAL'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_original_price_usd REAL'); } catch (_) {}
   try { db.exec('ALTER TABLE bulk_results ADD COLUMN ps_detail_url TEXT'); } catch (_) {}
@@ -130,142 +178,184 @@ function _migrate(db) {
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_audio INTEGER DEFAULT 0'); } catch (_) {}
   try { db.exec('ALTER TABLE catalog ADD COLUMN spanish_text INTEGER DEFAULT 0'); } catch (_) {}
 
-  // One-time cleanup: remove DLC-contaminated sub-$1 price records from psstore-us scrapes
-  // (DLC items like "FC Points 100" @ $0.99 were previously recorded under catalog game names)
+  // ── New bulk_results columns for the refactored system ───────────────────────
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN game_catalog_id INTEGER NULL'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN sony_alt_price_usd REAL NULL'); } catch (_) {}
+  try { db.exec('ALTER TABLE bulk_results ADD COLUMN sony_alt_region TEXT NULL'); } catch (_) {}
+
+  // ── One-time cleanup: remove DLC-contaminated sub-$1 price records ───────────
   try { db.exec("DELETE FROM price_history WHERE source = 'psstore-us' AND price_usd IS NOT NULL AND price_usd < 1.0"); } catch (_) {}
 
-  // Default settings
+  // ── Default settings ─────────────────────────────────────────────────────────
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('gift_card_rate', '0.72');
   db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('ars_to_usd', process.env.ARS_TO_USD || '1200');
+  db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run('alt_region', 'AR');
 
-  // Seed catalog if empty
-  const catalogCount = db.prepare('SELECT COUNT(*) as c FROM catalog').get();
-  if (catalogCount.c === 0) _seedCatalog(db);
+  // ── Migrate legacy catalog → game_catalog ────────────────────────────────────
+  // Safe to run every startup: INSERT OR IGNORE on display_name prevents duplicates
+  try {
+    const legacyGames = db.prepare('SELECT name, spanish_audio, spanish_text FROM catalog WHERE active=1').all();
+    const insGC = db.prepare(`
+      INSERT OR IGNORE INTO game_catalog
+        (base_title, edition, display_name, is_full_game, excluded, spanish_audio, spanish_text, created_at, updated_at)
+      VALUES (?, NULL, ?, 1, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    // Need a unique constraint to make INSERT OR IGNORE work — we add it via a separate UNIQUE index
+    for (const g of legacyGames) {
+      const exists = db.prepare('SELECT id FROM game_catalog WHERE display_name = ? COLLATE NOCASE').get(g.name);
+      if (!exists) {
+        insGC.run(
+          g.name.toLowerCase().trim(),
+          g.name,
+          g.spanish_audio || 0,
+          g.spanish_text  || 0
+        );
+      }
+    }
+  } catch (_) {}
+
+  // ── Seed game_catalog if still empty (fresh install with no legacy catalog) ──
+  const gcCount = db.prepare('SELECT COUNT(*) as c FROM game_catalog').get();
+  if (gcCount.c === 0) {
+    _seedGameCatalog(db);
+    // Also seed legacy catalog for backward compat
+    const catCount = db.prepare('SELECT COUNT(*) as c FROM catalog').get();
+    if (catCount.c === 0) _seedCatalog(db);
+  } else {
+    // Seed legacy catalog if empty (so bulk.js fallback still works)
+    const catCount = db.prepare('SELECT COUNT(*) as c FROM catalog').get();
+    if (catCount.c === 0) _seedCatalog(db);
+  }
 }
 
-function _seedCatalog(db) {
-  const games = [
-    'EA SPORTS FC 25', 'EA SPORTS FC 26', 'Grand Theft Auto V', 'Mortal Kombat 11', 'Minecraft',
-    'Red Dead Redemption 2', 'F1 24', 'F1 25', 'Need for Speed Heat', 'Call of Duty: Black Ops 6',
-    'Need for Speed Payback', 'Resident Evil 4', 'Resident Evil 7', 'God of War Ragnarok',
-    'The Last Of Us Part I PS5', 'The Last Of Us Part I PS4', 'God of War', 'Mortal Kombat XL',
-    'Battlefield 1', 'NBA 2K25', 'A Way Out', 'DRAGON BALL: Sparking! ZERO', 'Hogwarts Legacy',
-    'Resident Evil 8 Village', 'It Takes Two', 'Watch Dogs 2', 'Battlefield V', 'Resident Evil 2',
-    'The Last Of Us Part II PS4', 'The Last Of Us Part II PS5', 'Batman: Arkham Collection', 'Cuphead',
-    'FAR CRY 5', 'STAR WARS Jedi: Fallen Order', 'Assassins Creed Origins',
-    'SpiderMan: Game of the Year Edition', 'DRAGON BALL XENOVERSE 2', 'Far Cry Primal',
-    'Resident Evil 3', 'The Witcher 3: Wild Hunt', 'God of War 3 Remastered', 'Mortal Kombat 1',
-    'Dying Light', 'Need For Speed Rivals', 'Ark: Survival Evolved', 'Assassins Creed Valhalla',
-    'Detroit: Become Human', 'SpiderMan: Miles Morales', 'Mortal Kombat X', 'Far Cry 4',
-    'Metro Exodus', 'Assassins Creed Black Flag', 'Farming Simulator 22', 'Overcooked! 2',
-    'The Forest', 'EA SPORTS FC 24', 'Mafia III: Definitive Edition', 'Spiderman 2', 'WWE 2K24',
-    'Watch Dogs: Legion', 'Call of Duty: Black Ops Cold War', 'Crash Bandicoot 4',
-    'STAR WARS Jedi: Survivor', 'The Crew Motorfest',
-    'UNCHARTED: A Thief\'s End and The Lost Legacy', 'Bloodborne',
-    'Cuphead & The Delicious Last Course', 'ELDEN RING', 'Far Cry 6', 'UFC 5', 'Among Us',
-    'Call of Duty: Black Ops III: Zombies Chronicles', 'Gran Turismo 7',
-    'Jurassic World Evolution 2', 'The Witcher 3: Wild Hunt - Complete Edition',
-    'Uncharted: The Nathan Drake Collection', 'Assassins Creed Odyssey', 'Black Myth: Wukong',
-    'DRAGON BALL FIGHTERZ', 'Mafia: Definitive Edition', 'The Elder Scrolls V: Skyrim', 'Astro bot',
-    'DRAGON BALL Z: KAKAROT', 'Dead Island 2', 'Forza Horizon 5',
-    'Ghost of Tsushima DIRECTOR\'S CUT', 'Hollow Knight Voidheart Edition',
-    'Marvel\'s Guardians of the Galaxy', 'Outlast 2', 'Spiderman Remastered PS5', 'Stardew Valley',
-    'Crash Bandicoot N.Sane Trilogy', 'Days Gone', 'Far Cry New Dawn',
-    'LEGO Star Wars: The Skywalker Saga', 'NARUTO SHIPPUDEN: Ultimate Ninja STORM 4',
-    'theHunter: Call of the Wild', 'Assassins Creed Mirage', 'Back 4 Blood',
-    'Crash Team Racing Nitro-Fueled', 'Cyberpunk 2077', 'DOOM', 'Mafia II: Definitive Edition',
-    'Outlast', 'South Park: La Vara de la Verdad', 'The Evil Within', 'UFC 4',
-    'Assassins Creed Triple Pack: Black Flag Unity Syndicate', 'Battlefield 2042',
-    'Call of Duty: Modern Warfare III', 'DOOM Eternal', 'Dead by Daylight', 'Diablo IV',
-    'Farming Simulator 25', 'Grand Theft Auto: The Trilogy', 'Hades', 'Horizon Forbidden West',
-    'Mx vs Atv Legends', 'No Man\'s Sky', 'Persona 5 Royal', 'SONIC X SHADOW GENERATIONS',
-    'South Park: The Fractured but Whole', 'Subnautica: Below Zero', 'Tekken 7',
-    'The Evil Within 2', 'UNCHARTED: Legacy of Thieves', 'Yakuza: Like a Dragon',
-    'inFAMOUS Second Son', 'Alan Wake 2', 'Call of Duty: Modern Warfare II', 'DARK SOULS III',
-    'DayZ', 'Dead Space', 'Dying Light 2: Stay Human', 'F1 23', 'FINAL FANTASY VIII Remastered',
-    'Tom Clancy\'s Ghost Recon Breakpoint', 'Grounded', 'HITMAN World of Assassination',
-    'Horizon Zero Dawn: Complete Edition', 'METAL GEAR SOLID V: THE PHANTOM PAIN',
-    'Monster Hunter Rise', 'NARUTO TO BORUTO: SHINOBI STRIKER', 'Red Dead Redemption',
-    'STAR WARS Battlefront 2', 'Sekiro: Shadows Die Twice', 'WWE 2K25', 'Wolfenstein II',
-    'Jurassic World Evolution', 'L.A. NOIRE', 'Little Nightmares II',
-    'NARUTO SHIPPUDEN: Ultimate Ninja STORM Legacy', 'Stray', 'The Crew 2', 'DARK SOULS II',
-    'Ratchet & Clank: Rift Apart', 'Prince of Persia: The Lost Crown', 'Wo Long: Fallen Dynasty',
-    'DEATHLOOP', 'SONIC SUPERSTARS', 'Psychonauts 2', 'SnowRunner',
-    'Kingdom Come: Deliverance', 'METAL GEAR SOLID 3: Snake Eater Master Collection',
-    'Kingdom Come: Deliverance II', 'Persona 5', 'Overcooked! All You Can Eat',
-    'NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS', 'Sniper Elite 4', 'Returnal',
-    'Baldur\'s Gate 3', 'Sniper Elite: Resistance', 'Lies of P', 'Star Wars Outlaws',
-    'ARK Survival Ascended', 'Life is Strange True Colors', 'Sifu',
-    'Tom Clancy\'s Rainbow Six Siege', 'Human Fall Flat', 'Metaphor: ReFantazio',
-    'ELDEN RING NIGHTREIGN', 'Street Fighter 6', 'Assassins Creed Shadows', 'DOOM: The Dark Ages',
-    'Persona 3 Reload', 'Ready or Not', 'Like a Dragon: Infinite Wealth', 'Mafia: Trilogy',
-    'Five Nights at Freddy\'s: Help Wanted', 'TopSpin 2K25', 'Sniper Elite 5', 'Subnautica',
-    'Split Fiction', 'Ratchet & Clank', 'Remnant: From the Ashes', 'Remnant II',
-    'The Elder Scrolls IV: Oblivion Remastered', 'Control: Ultimate Edition', 'Raft',
-    'Monster Hunter Wilds', 'Hollow Knight Silksong', 'NBA 2k26', 'Moving Out 2',
-    'Goat Simulator 3', 'Hot Wheels Unleashed 2', 'Hot Wheels Unleashed',
-    'Sackboy: La Gran Aventura', 'Ride 5', 'Alien Isolation', 'WRC 9 FIA World Rally Championship',
-    'Ghost of Yotei', 'SAND LAND Deluxe Edition', 'Ghostrunner', 'Battlefield 6',
-    'PS Plus Essential 1 mes', 'PS Plus Essential 3 meses', 'PS Plus Essential 12 meses',
-    'PS Plus Extra 1 mes', 'PS Plus Extra 3 meses', 'PS Plus Extra 12 meses',
-    'PS Plus Deluxe 1 mes', 'PS Plus Deluxe 3 meses', 'PS Plus Deluxe 12 meses',
-    'Call of Duty: Modern Warfare', 'Gang Beasts', 'Call of Duty: Black Ops 7', 'Silent Hill 2',
-    'Silent Hill F', 'Death Stranding', 'Death Stranding 2', 'Expedition 33',
-    'Indiana Jones and the Great Circle', 'Helldivers 2', 'Arc Raiders', 'Rise of the Ronin',
-    'Borderlands 4', 'METAL GEAR SOLID Delta: SNAKE EATER', 'Mafia: The Old Country',
-    'The Outer Worlds 2', 'Days Gone Remastered', 'Mortal Kombat Legacy Kollection',
-    'Call of Duty: Black Ops 4', 'Jak and Daxter: The Precursor Legacy', 'Dying Light: The Beast',
-    'Jurassic World Evolution 3', 'ONE PIECE ODYSSEY', 'ONE PIECE PIRATE WARRIOR 3',
-    'ONE PIECE PIRATE WARRIOR 4', 'Tom Clancy\'s Ghost Recon Wildlands',
-    'Avatar: Frontiers of Pandora', 'Flight Simulator 2024', 'Steep', 'DELTARUNE', 'TEKKEN 8',
-    'Party Animals', 'KINGDOM HEARTS III', 'Slime Rancher', 'Slime Rancher 2', 'Fallout 4',
-    'DEATH NOTE Killer Within', 'THE KING OF FIGHTERS XV', 'Aliens: Fireteam Elite', 'Undisputed',
-    'The Quarry', 'MY HERO ACADEMIA: All\'s Justice', 'Resident Evil Requiem',
-    'Need for Speed Unbound', 'Resident Evil 5', 'Resident Evil 6',
-    'Five Nights at Freddy\'s: Secret of the Mimic', 'Terraria', 'Phasmophobia',
-    'La Tierra Media: Sombras de Mordor', 'Five Nights at Freddy\'s: Security Breach',
-    'The Warriors', 'Far Cry 3', 'WRC 10 FIA World Rally Championship',
-    'LEGO Marvel Super Heroes', 'SHADOW OF THE COLOSSUS', 'Wobbly Life',
-    'LEGO Marvel Super Heroes 2', 'Twisted Metal: Black', 'A Plague Tale: Requiem',
-    'METAL GEAR SOLID: MASTER COLLECTION Vol.1', 'Gears of War: Reloaded', 'Riders Republic',
-    'Nioh 3', 'Call of Duty: Vanguard', 'Need for Speed Hot Pursuit',
-    'Devil May Cry 5 + Vergil', 'Batman: Arkham Knight', 'Crisol: Theater of Idols', 'REANIMAL',
-    'Horizon Zero Dawn Remastered', 'Goat Simulator', 'Goat Simulator Remastered',
-    'God of War Sons of Sparta', 'CODE VEIN II', 'TIEBREAK', 'Contraband Police', 'PAYDAY 3',
-    'PAYDAY 2', 'RIDE 6', 'Legacy of Kain Soul Reaver 1&2 Remastered', 'RoadCraft',
-    'Assetto Corsa', 'Assetto Corsa Competizione', 'Overcooked! + Overcooked! 2',
-    'LEGO CITY Undercover', 'Watch Dogs 1 + Watch Dogs 2', 'Cronos: The New Dawn',
-    'FINAL FANTASY VII REBIRTH', 'MADiSON', 'We Happy Few', 'Rust', 'Hell Let Loose',
-    'Little Nightmares', 'Little Nightmares III', 'Poppy Playtime Chapter 1',
-    'Poppy Playtime Chapter 2', 'Poppy Playtime Chapter 3', 'Poppy Playtime Chapter 4',
-    'Crimson Desert', 'Age of Empires II: Definitive Edition', 'Green Hell', 'Borderlands 3',
-    'Demon Slayer The Hinokami Chronicles', 'Demon Slayer The Hinokami Chronicles 2',
-    'RESIDENT EVIL 2 Deluxe Edition', 'Resident Evil 4 Gold Edition',
-    'Resident Evil Village Gold Edition', 'Resident Evil Requiem Deluxe Edition',
-    'DRAGON BALL Z: KAKAROT DAIMA EDITION', 'ASTRONEER', 'DRAGON BALL XENOVERSE 2 Deluxe Edition',
-    'Hello Neighbor 2', '7 Days to Die', 'TRAIL OUT',
-    'It Takes Two + A Way Out Hazelight Bundle', 'Hellblade: Senua\'s Sacrifice',
-    'Senua\'s Saga: Hellblade II', 'Marathon', 'FINAL FANTASY VII REMAKE',
-    'Sonic Racing CrossWorlds', 'MLB The Show 26', 'Jujutsu Kaisen Cursed Clash',
-    'NieR Automata Game of the YoRHa Edition',
-    'Teenage Mutant Ninja Turtles: The Cowabunga Collection',
-    'Brothers: a Tale of two Sons', 'Brothers: A Tale of Two Sons Remake', 'Serious Sam 4',
-    'WWE 2K26', 'Sniper Ghost Warrior Contracts 2', 'Plants vs. Zombies Replanted',
-    'Stellar Blade', 'Mortal Kombat 1: Definitive Edition', 'Warhammer 40000 Space Marine 2',
-    'Mortal Kombat 11 Ultimate', 'Life is Strange Reunion', 'Injustice 2', 'RIDE 4', 'Avowed',
-    'FINAL FANTASY XVI', 'Tony Hawks Pro Skater 3 + 4', 'LEGO NINJAGO',
-    'Five Nights at Freddy\'s', 'Five Nights at Freddy\'s 2', 'Five Nights at Freddy\'s 3',
-    'Five Nights at Freddy\'s 4', 'Five Nights at Freddy\'s: Help Wanted 2', 'PRAGMATA',
-    'STALKER 2 Heart of Chornobyl', 'Valentino Rossi The Game', 'Sonic Frontiers',
-    'Resident Evil 4 (2005)', 'Tour de France 2025', 'Sonic Origins', 'MotoGP 26', 'Starfield',
-    'Minecraft Dungeons', 'SAROS', 'MOTORSLICE', 'Directiva 8020', 'MotoGP 21',
-  ];
+// ── Seed data ──────────────────────────────────────────────────────────────────
 
+const SEED_GAMES = [
+  'EA SPORTS FC 25', 'EA SPORTS FC 26', 'Grand Theft Auto V', 'Mortal Kombat 11', 'Minecraft',
+  'Red Dead Redemption 2', 'F1 24', 'F1 25', 'Need for Speed Heat', 'Call of Duty: Black Ops 6',
+  'Need for Speed Payback', 'Resident Evil 4', 'Resident Evil 7', 'God of War Ragnarok',
+  'The Last Of Us Part I PS5', 'The Last Of Us Part I PS4', 'God of War', 'Mortal Kombat XL',
+  'Battlefield 1', 'NBA 2K25', 'A Way Out', 'DRAGON BALL: Sparking! ZERO', 'Hogwarts Legacy',
+  'Resident Evil 8 Village', 'It Takes Two', 'Watch Dogs 2', 'Battlefield V', 'Resident Evil 2',
+  'The Last Of Us Part II PS4', 'The Last Of Us Part II PS5', 'Batman: Arkham Collection', 'Cuphead',
+  'FAR CRY 5', 'STAR WARS Jedi: Fallen Order', 'Assassins Creed Origins',
+  'SpiderMan: Game of the Year Edition', 'DRAGON BALL XENOVERSE 2', 'Far Cry Primal',
+  'Resident Evil 3', 'The Witcher 3: Wild Hunt', 'God of War 3 Remastered', 'Mortal Kombat 1',
+  'Dying Light', 'Need For Speed Rivals', 'Ark: Survival Evolved', 'Assassins Creed Valhalla',
+  'Detroit: Become Human', 'SpiderMan: Miles Morales', 'Mortal Kombat X', 'Far Cry 4',
+  'Metro Exodus', 'Assassins Creed Black Flag', 'Farming Simulator 22', 'Overcooked! 2',
+  'The Forest', 'EA SPORTS FC 24', 'Mafia III: Definitive Edition', 'Spiderman 2', 'WWE 2K24',
+  'Watch Dogs: Legion', 'Call of Duty: Black Ops Cold War', 'Crash Bandicoot 4',
+  'STAR WARS Jedi: Survivor', 'The Crew Motorfest',
+  "UNCHARTED: A Thief's End and The Lost Legacy", 'Bloodborne',
+  'Cuphead & The Delicious Last Course', 'ELDEN RING', 'Far Cry 6', 'UFC 5', 'Among Us',
+  'Call of Duty: Black Ops III: Zombies Chronicles', 'Gran Turismo 7',
+  'Jurassic World Evolution 2', 'The Witcher 3: Wild Hunt - Complete Edition',
+  'Uncharted: The Nathan Drake Collection', 'Assassins Creed Odyssey', 'Black Myth: Wukong',
+  'DRAGON BALL FIGHTERZ', 'Mafia: Definitive Edition', 'The Elder Scrolls V: Skyrim', 'Astro bot',
+  'DRAGON BALL Z: KAKAROT', 'Dead Island 2', 'Forza Horizon 5',
+  "Ghost of Tsushima DIRECTOR'S CUT", 'Hollow Knight Voidheart Edition',
+  "Marvel's Guardians of the Galaxy", 'Outlast 2', 'Spiderman Remastered PS5', 'Stardew Valley',
+  'Crash Bandicoot N.Sane Trilogy', 'Days Gone', 'Far Cry New Dawn',
+  'LEGO Star Wars: The Skywalker Saga', 'NARUTO SHIPPUDEN: Ultimate Ninja STORM 4',
+  'theHunter: Call of the Wild', 'Assassins Creed Mirage', 'Back 4 Blood',
+  'Crash Team Racing Nitro-Fueled', 'Cyberpunk 2077', 'DOOM', 'Mafia II: Definitive Edition',
+  'Outlast', 'South Park: La Vara de la Verdad', 'The Evil Within', 'UFC 4',
+  'Assassins Creed Triple Pack: Black Flag Unity Syndicate', 'Battlefield 2042',
+  'Call of Duty: Modern Warfare III', 'DOOM Eternal', 'Dead by Daylight', 'Diablo IV',
+  'Farming Simulator 25', 'Grand Theft Auto: The Trilogy', 'Hades', 'Horizon Forbidden West',
+  'Mx vs Atv Legends', "No Man's Sky", 'Persona 5 Royal', 'SONIC X SHADOW GENERATIONS',
+  'South Park: The Fractured but Whole', 'Subnautica: Below Zero', 'Tekken 7',
+  'The Evil Within 2', 'UNCHARTED: Legacy of Thieves', 'Yakuza: Like a Dragon',
+  'inFAMOUS Second Son', 'Alan Wake 2', 'Call of Duty: Modern Warfare II', 'DARK SOULS III',
+  'DayZ', 'Dead Space', 'Dying Light 2: Stay Human', 'F1 23', 'FINAL FANTASY VIII Remastered',
+  "Tom Clancy's Ghost Recon Breakpoint", 'Grounded', 'HITMAN World of Assassination',
+  'Horizon Zero Dawn: Complete Edition', 'METAL GEAR SOLID V: THE PHANTOM PAIN',
+  'Monster Hunter Rise', 'NARUTO TO BORUTO: SHINOBI STRIKER', 'Red Dead Redemption',
+  'STAR WARS Battlefront 2', 'Sekiro: Shadows Die Twice', 'WWE 2K25', 'Wolfenstein II',
+  'Jurassic World Evolution', 'L.A. NOIRE', 'Little Nightmares II',
+  'NARUTO SHIPPUDEN: Ultimate Ninja STORM Legacy', 'Stray', 'The Crew 2', 'DARK SOULS II',
+  'Ratchet & Clank: Rift Apart', 'Prince of Persia: The Lost Crown', 'Wo Long: Fallen Dynasty',
+  'DEATHLOOP', 'SONIC SUPERSTARS', 'Psychonauts 2', 'SnowRunner',
+  'Kingdom Come: Deliverance', 'METAL GEAR SOLID 3: Snake Eater Master Collection',
+  'Kingdom Come: Deliverance II', 'Persona 5', 'Overcooked! All You Can Eat',
+  'NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS', 'Sniper Elite 4', 'Returnal',
+  "Baldur's Gate 3", 'Sniper Elite: Resistance', 'Lies of P', 'Star Wars Outlaws',
+  'ARK Survival Ascended', 'Life is Strange True Colors', 'Sifu',
+  "Tom Clancy's Rainbow Six Siege", 'Human Fall Flat', 'Metaphor: ReFantazio',
+  'ELDEN RING NIGHTREIGN', 'Street Fighter 6', 'Assassins Creed Shadows', 'DOOM: The Dark Ages',
+  'Persona 3 Reload', 'Ready or Not', 'Like a Dragon: Infinite Wealth', 'Mafia: Trilogy',
+  "Five Nights at Freddy's: Help Wanted", 'TopSpin 2K25', 'Sniper Elite 5', 'Subnautica',
+  'Split Fiction', 'Ratchet & Clank', 'Remnant: From the Ashes', 'Remnant II',
+  'The Elder Scrolls IV: Oblivion Remastered', 'Control: Ultimate Edition', 'Raft',
+  'Monster Hunter Wilds', 'Hollow Knight Silksong', 'NBA 2k26', 'Moving Out 2',
+  'Goat Simulator 3', 'Hot Wheels Unleashed 2', 'Hot Wheels Unleashed',
+  'Sackboy: La Gran Aventura', 'Ride 5', 'Alien Isolation', 'WRC 9 FIA World Rally Championship',
+  'Ghost of Yotei', 'SAND LAND Deluxe Edition', 'Ghostrunner', 'Battlefield 6',
+  'PS Plus Essential 1 mes', 'PS Plus Essential 3 meses', 'PS Plus Essential 12 meses',
+  'PS Plus Extra 1 mes', 'PS Plus Extra 3 meses', 'PS Plus Extra 12 meses',
+  'PS Plus Deluxe 1 mes', 'PS Plus Deluxe 3 meses', 'PS Plus Deluxe 12 meses',
+  'Call of Duty: Modern Warfare', 'Gang Beasts', 'Call of Duty: Black Ops 7', 'Silent Hill 2',
+  'Silent Hill F', 'Death Stranding', 'Death Stranding 2', 'Expedition 33',
+  'Indiana Jones and the Great Circle', 'Helldivers 2', 'Arc Raiders', 'Rise of the Ronin',
+  'Borderlands 4', 'METAL GEAR SOLID Delta: SNAKE EATER', 'Mafia: The Old Country',
+  'The Outer Worlds 2', 'Days Gone Remastered', 'Mortal Kombat Legacy Kollection',
+  'Call of Duty: Black Ops 4', 'Jak and Daxter: The Precursor Legacy', 'Dying Light: The Beast',
+  'Jurassic World Evolution 3', 'ONE PIECE ODYSSEY', 'ONE PIECE PIRATE WARRIOR 3',
+  'ONE PIECE PIRATE WARRIOR 4', "Tom Clancy's Ghost Recon Wildlands",
+  'Avatar: Frontiers of Pandora', 'Flight Simulator 2024', 'Steep', 'DELTARUNE', 'TEKKEN 8',
+  'Party Animals', 'KINGDOM HEARTS III', 'Slime Rancher', 'Slime Rancher 2', 'Fallout 4',
+  'DEATH NOTE Killer Within', 'THE KING OF FIGHTERS XV', 'Aliens: Fireteam Elite', 'Undisputed',
+  'The Quarry', "MY HERO ACADEMIA: All's Justice", 'Resident Evil Requiem',
+  'Need for Speed Unbound', 'Resident Evil 5', 'Resident Evil 6',
+  "Five Nights at Freddy's: Secret of the Mimic", 'Terraria', 'Phasmophobia',
+  'La Tierra Media: Sombras de Mordor', "Five Nights at Freddy's: Security Breach",
+  'The Warriors', 'Far Cry 3', 'WRC 10 FIA World Rally Championship',
+  'LEGO Marvel Super Heroes', 'SHADOW OF THE COLOSSUS', 'Wobbly Life',
+  'LEGO Marvel Super Heroes 2', 'Twisted Metal: Black', 'A Plague Tale: Requiem',
+  'METAL GEAR SOLID: MASTER COLLECTION Vol.1', 'Gears of War: Reloaded', 'Riders Republic',
+  'Nioh 3', 'Call of Duty: Vanguard', 'Need for Speed Hot Pursuit',
+  'Devil May Cry 5 + Vergil', 'Batman: Arkham Knight', 'Crisol: Theater of Idols', 'REANIMAL',
+  'Horizon Zero Dawn Remastered', 'Goat Simulator', 'Goat Simulator Remastered',
+  'God of War Sons of Sparta', 'CODE VEIN II', 'TIEBREAK', 'Contraband Police', 'PAYDAY 3',
+  'PAYDAY 2', 'RIDE 6', 'Legacy of Kain Soul Reaver 1&2 Remastered', 'RoadCraft',
+  'Assetto Corsa', 'Assetto Corsa Competizione', 'Overcooked! + Overcooked! 2',
+  'LEGO CITY Undercover', 'Watch Dogs 1 + Watch Dogs 2', 'Cronos: The New Dawn',
+  'FINAL FANTASY VII REBIRTH', 'MADiSON', 'We Happy Few', 'Rust', 'Hell Let Loose',
+  'Little Nightmares', 'Little Nightmares III', 'Poppy Playtime Chapter 1',
+  'Poppy Playtime Chapter 2', 'Poppy Playtime Chapter 3', 'Poppy Playtime Chapter 4',
+  'Crimson Desert', 'Age of Empires II: Definitive Edition', 'Green Hell', 'Borderlands 3',
+  'Demon Slayer The Hinokami Chronicles', 'Demon Slayer The Hinokami Chronicles 2',
+  'RESIDENT EVIL 2 Deluxe Edition', 'Resident Evil 4 Gold Edition',
+  'Resident Evil Village Gold Edition', 'Resident Evil Requiem Deluxe Edition',
+  'DRAGON BALL Z: KAKAROT DAIMA EDITION', 'ASTRONEER', 'DRAGON BALL XENOVERSE 2 Deluxe Edition',
+  'Hello Neighbor 2', '7 Days to Die', 'TRAIL OUT',
+  'It Takes Two + A Way Out Hazelight Bundle', "Hellblade: Senua's Sacrifice",
+  "Senua's Saga: Hellblade II", 'Marathon', 'FINAL FANTASY VII REMAKE',
+  'Sonic Racing CrossWorlds', 'MLB The Show 26', 'Jujutsu Kaisen Cursed Clash',
+  'NieR Automata Game of the YoRHa Edition',
+  'Teenage Mutant Ninja Turtles: The Cowabunga Collection',
+  'Brothers: a Tale of two Sons', 'Brothers: A Tale of Two Sons Remake', 'Serious Sam 4',
+  'WWE 2K26', 'Sniper Ghost Warrior Contracts 2', 'Plants vs. Zombies Replanted',
+  'Stellar Blade', 'Mortal Kombat 1: Definitive Edition', 'Warhammer 40000 Space Marine 2',
+  'Mortal Kombat 11 Ultimate', 'Life is Strange Reunion', 'Injustice 2', 'RIDE 4', 'Avowed',
+  'FINAL FANTASY XVI', 'Tony Hawks Pro Skater 3 + 4', 'LEGO NINJAGO',
+  "Five Nights at Freddy's", "Five Nights at Freddy's 2", "Five Nights at Freddy's 3",
+  "Five Nights at Freddy's 4", "Five Nights at Freddy's: Help Wanted 2", 'PRAGMATA',
+  'STALKER 2 Heart of Chornobyl', 'Valentino Rossi The Game', 'Sonic Frontiers',
+  'Resident Evil 4 (2005)', 'Tour de France 2025', 'Sonic Origins', 'MotoGP 26', 'Starfield',
+  'Minecraft Dungeons', 'SAROS', 'MOTORSLICE', 'Directiva 8020', 'MotoGP 21',
+];
+
+function _seedGameCatalog(db) {
   const now = new Date().toISOString();
-  const ins = db.prepare('INSERT OR IGNORE INTO catalog (name, added_at) VALUES (?, ?)');
+  const ins = db.prepare(`
+    INSERT OR IGNORE INTO game_catalog (base_title, edition, display_name, is_full_game, excluded, created_at, updated_at)
+    VALUES (?, NULL, ?, 1, 0, ?, ?)
+  `);
   db.exec('BEGIN');
   try {
-    for (const name of games) ins.run(name, now);
+    for (const name of SEED_GAMES) ins.run(name.toLowerCase().trim(), name, now, now);
     db.exec('COMMIT');
   } catch (e) {
     db.exec('ROLLBACK');
@@ -273,7 +363,20 @@ function _seedCatalog(db) {
   }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+function _seedCatalog(db) {
+  const now = new Date().toISOString();
+  const ins = db.prepare('INSERT OR IGNORE INTO catalog (name, added_at) VALUES (?, ?)');
+  db.exec('BEGIN');
+  try {
+    for (const name of SEED_GAMES) ins.run(name, now);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+// ── Settings helpers ───────────────────────────────────────────────────────────
 
 function getSetting(key) {
   const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -285,87 +388,123 @@ function setSetting(key, value) {
 }
 
 function getGiftCardRate() { return parseFloat(getSetting('gift_card_rate') || '0.72'); }
-function getArsToUsd()     { return parseFloat(getSetting('ars_to_usd')     || process.env.ARS_TO_USD || '1200'); }
+function getArsToUsd()     { return parseFloat(getSetting('ars_to_usd') || process.env.ARS_TO_USD || '1200'); }
+function getAltRegion()    { return getSetting('alt_region') || 'AR'; }
 
-function recordPrice(gameName, source, priceUsd, opts = {}) {
-  getDb().prepare(`
-    INSERT INTO price_history (game_name, source, price_usd, price_raw, currency, discount_pct, sale_end, scraped_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(gameName, source, priceUsd, opts.raw || null, opts.currency || 'USD',
-         opts.discount || null, opts.saleEnd || null, new Date().toISOString());
-}
+// ── game_catalog helpers ───────────────────────────────────────────────────────
 
-function getMinHistoricalPrice(gameName) {
+/** Returns all non-excluded game_catalog entries */
+function getGameCatalog({ includeExcluded = false } = {}) {
   const db = getDb();
-
-  // Own rolling scrapes — filter > 1 to exclude DLC-contaminated sub-$1 records
-  const histRow = db.prepare(
-    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd > 1"
-  ).get(gameName);
-
-  // PSDeals detailed Highcharts history (populated by the manual history job)
-  const detailRow = db.prepare(
-    'SELECT MIN(price_usd) as min FROM ps_price_history_detail WHERE game_name = ? AND price_usd > 0'
-  ).get(gameName);
-
-  // PlatPrices best-ever sale price — authoritative external historical data
-  const ppRow = db.prepare(
-    'SELECT sale_price_usd FROM platprices_cache WHERE game_name = ? AND sale_price_usd IS NOT NULL'
-  ).get(gameName);
-
-  const candidates = [histRow?.min, detailRow?.min, ppRow?.sale_price_usd].filter(v => v != null);
-  return candidates.length ? Math.min(...candidates) : null;
+  const query = includeExcluded
+    ? 'SELECT * FROM game_catalog ORDER BY display_name ASC'
+    : 'SELECT * FROM game_catalog WHERE excluded=0 ORDER BY display_name ASC';
+  return db.prepare(query).all();
 }
 
-// Returns price history suitable for a chart: one point per unique date (cheapest that day)
-function getPriceDetailHistory(gameName) {
-  // Prefer ps_price_history_detail (psdeals chart data) when available
-  const detail = getDb().prepare(
-    'SELECT price_usd, date_label, recorded_at FROM ps_price_history_detail WHERE game_name = ? ORDER BY recorded_at ASC'
-  ).all(gameName);
-  if (detail.length > 0) return detail;
-
-  // Fallback: build history from our own bulk-refresh price_history records
-  const rows = getDb().prepare(
-    "SELECT price_usd, scraped_at FROM price_history WHERE game_name = ? AND source = 'psstore-us' AND price_usd IS NOT NULL ORDER BY scraped_at ASC"
-  ).all(gameName);
-  if (!rows.length) return [];
-
-  // Deduplicate by date — keep cheapest price per day
-  const byDate = {};
-  for (const r of rows) {
-    const day = r.scraped_at.slice(0, 10);
-    if (!byDate[day] || r.price_usd < byDate[day]) byDate[day] = r.price_usd;
-  }
-  return Object.entries(byDate).map(([day, price]) => ({
-    price_usd:  price,
-    date_label: day,
-    recorded_at: day,
-  }));
+function getGameCatalogById(id) {
+  return getDb().prepare('SELECT * FROM game_catalog WHERE id = ?').get(id);
 }
 
-function savePriceDetailHistory(gameName, points) {
-  const db  = getDb();
-  const ins = db.prepare('INSERT INTO ps_price_history_detail (game_name, price_usd, date_label, recorded_at) VALUES (?, ?, ?, ?)');
+/** Insert a new game_catalog entry. Returns { id, created: bool } */
+function addGameCatalogEntry({
+  parent_id = null, base_title, edition = null, display_name,
+  sony_us_url = null, sony_alt_url = null, sony_alt_region = null, turkey_url = null,
+  sony_us_confidence = 0, sony_alt_confidence = 0, turkey_confidence = 0,
+  validated_at = null, validated_by = null,
+  is_full_game = 1, excluded = 0,
+  spanish_audio = 0, spanish_text = 0,
+  psdeals_url = null,
+}) {
+  const db = getDb();
+  // Check for exact duplicate by display_name (case-insensitive)
+  const existing = db.prepare('SELECT id FROM game_catalog WHERE display_name = ? COLLATE NOCASE').get(display_name);
+  if (existing) return { id: existing.id, created: false };
+
   const now = new Date().toISOString();
-  db.exec('BEGIN');
-  try {
-    for (const p of points) ins.run(gameName, p.price, p.date, now);
-    db.exec('COMMIT');
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
-  }
+  const result = db.prepare(`
+    INSERT INTO game_catalog
+      (parent_id, base_title, edition, display_name,
+       sony_us_url, sony_alt_url, sony_alt_region, turkey_url,
+       sony_us_confidence, sony_alt_confidence, turkey_confidence,
+       validated_at, validated_by, is_full_game, excluded,
+       spanish_audio, spanish_text, psdeals_url, created_at, updated_at)
+    VALUES (?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?)
+  `).run(
+    parent_id, base_title, edition, display_name,
+    sony_us_url, sony_alt_url, sony_alt_region, turkey_url,
+    sony_us_confidence, sony_alt_confidence, turkey_confidence,
+    validated_at, validated_by, is_full_game ? 1 : 0, excluded ? 1 : 0,
+    spanish_audio ? 1 : 0, spanish_text ? 1 : 0,
+    psdeals_url, now, now
+  );
+  return { id: result.lastInsertRowid, created: true };
 }
 
-function detectSaleDates(gameName) {
-  // Include our own scrape data for sale detection, not just psdeals
-  return getDb().prepare(
-    "SELECT scraped_at, price_usd FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND discount_pct > 0 ORDER BY scraped_at ASC"
-  ).all(gameName).map(r => ({ date: r.scraped_at.slice(0, 10), price: r.price_usd }));
+/** Update any fields on a game_catalog entry */
+function updateGameCatalogEntry(id, updates) {
+  const db  = getDb();
+  const now = new Date().toISOString();
+  const fields = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  const values = Object.values(updates);
+  db.prepare(`UPDATE game_catalog SET ${fields}, updated_at = ? WHERE id = ?`)
+    .run(...values, now, id);
 }
 
-// ── Catalog ───────────────────────────────────────────────────────────────────
+/** Set error on a catalog entry (e.g. broken URL) */
+function setGameCatalogError(id, error) {
+  const now = new Date().toISOString();
+  getDb().prepare(`UPDATE game_catalog SET last_error = ?, last_error_at = ?, updated_at = ? WHERE id = ?`)
+    .run(error, now, now, id);
+}
+
+/** Clear error state on a catalog entry */
+function clearGameCatalogError(id) {
+  const now = new Date().toISOString();
+  getDb().prepare(`UPDATE game_catalog SET last_error = NULL, last_error_at = NULL, updated_at = ? WHERE id = ?`)
+    .run(now, id);
+}
+
+/** Mark an entry as validated by user or auto */
+function validateGameCatalogEntry(id, by = 'user') {
+  const now = new Date().toISOString();
+  getDb().prepare(`UPDATE game_catalog SET validated_at = ?, validated_by = ?, updated_at = ? WHERE id = ?`)
+    .run(now, by, now, id);
+}
+
+/** Exclude (soft-delete) a catalog entry */
+function excludeGameCatalogEntry(id) {
+  const now = new Date().toISOString();
+  getDb().prepare(`UPDATE game_catalog SET excluded = 1, updated_at = ? WHERE id = ?`).run(now, id);
+}
+
+/** Count unvalidated entries */
+function countUnvalidated() {
+  return getDb().prepare('SELECT COUNT(*) as n FROM game_catalog WHERE excluded=0 AND validated_at IS NULL').get()?.n || 0;
+}
+
+/** Update PSDeals data in a catalog entry */
+function setGameCatalogPSDealsData(id, { psdeals_url, min_price_usd_alltime, min_price_date, current_sale_price_usd, current_sale_end_date }) {
+  const now = new Date().toISOString();
+  getDb().prepare(`
+    UPDATE game_catalog SET
+      psdeals_url            = COALESCE(?, psdeals_url),
+      psdeals_last_checked   = ?,
+      min_price_usd_alltime  = ?,
+      min_price_date         = ?,
+      current_sale_price_usd = ?,
+      current_sale_end_date  = ?,
+      updated_at             = ?
+    WHERE id = ?
+  `).run(
+    psdeals_url, now,
+    min_price_usd_alltime, min_price_date,
+    current_sale_price_usd, current_sale_end_date,
+    now, id
+  );
+}
+
+// ── Legacy catalog helpers (kept for backward compat) ─────────────────────────
 
 function getCatalog() {
   return getDb().prepare('SELECT * FROM catalog WHERE active=1 ORDER BY name ASC').all();
@@ -392,12 +531,12 @@ function updateCatalogLang(id, spanishAudio, spanishText) {
 }
 
 // ── Lang cache ────────────────────────────────────────────────────────────────
-const LANG_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const LANG_CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 function getLangCache(turkeyUrl) {
   const row = getDb().prepare('SELECT spanish_audio, spanish_text, checked_at FROM lang_cache WHERE turkey_url = ?').get(turkeyUrl);
   if (!row) return null;
-  if (Date.now() - new Date(row.checked_at).getTime() > LANG_CACHE_TTL_MS) return null; // expired
+  if (Date.now() - new Date(row.checked_at).getTime() > LANG_CACHE_TTL_MS) return null;
   return { spanishAudio: !!row.spanish_audio, spanishText: !!row.spanish_text };
 }
 
@@ -406,4 +545,99 @@ function setLangCache(turkeyUrl, spanishAudio, spanishText) {
     .run(turkeyUrl, spanishAudio ? 1 : 0, spanishText ? 1 : 0, new Date().toISOString());
 }
 
-module.exports = { getDb, getSetting, setSetting, getGiftCardRate, getArsToUsd, recordPrice, getMinHistoricalPrice, getPriceDetailHistory, savePriceDetailHistory, detectSaleDates, getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang, getLangCache, setLangCache };
+// ── Price history helpers ──────────────────────────────────────────────────────
+
+function recordPrice(gameName, source, priceUsd, opts = {}) {
+  getDb().prepare(`
+    INSERT INTO price_history (game_name, source, price_usd, price_raw, currency, discount_pct, sale_end, scraped_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(gameName, source, priceUsd, opts.raw || null, opts.currency || 'USD',
+         opts.discount || null, opts.saleEnd || null, new Date().toISOString());
+}
+
+function getMinHistoricalPrice(gameName) {
+  const db = getDb();
+
+  // Own rolling scrapes (filter > 1 to exclude DLC-contaminated sub-$1 records)
+  const histRow = db.prepare(
+    "SELECT MIN(price_usd) as min FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND price_usd > 1"
+  ).get(gameName);
+
+  // PSDeals detailed Highcharts history
+  const detailRow = db.prepare(
+    'SELECT MIN(price_usd) as min FROM ps_price_history_detail WHERE game_name = ? AND price_usd > 0'
+  ).get(gameName);
+
+  // NEW: PSDeals data stored directly in game_catalog
+  const gcRow = db.prepare(
+    'SELECT min_price_usd_alltime FROM game_catalog WHERE display_name = ? COLLATE NOCASE AND min_price_usd_alltime IS NOT NULL LIMIT 1'
+  ).get(gameName);
+
+  const candidates = [
+    histRow?.min,
+    detailRow?.min,
+    gcRow?.min_price_usd_alltime,
+  ].filter(v => v != null && v > 0);
+
+  return candidates.length ? Math.min(...candidates) : null;
+}
+
+function getPriceDetailHistory(gameName) {
+  const detail = getDb().prepare(
+    'SELECT price_usd, date_label, recorded_at FROM ps_price_history_detail WHERE game_name = ? ORDER BY recorded_at ASC'
+  ).all(gameName);
+  if (detail.length > 0) return detail;
+
+  const rows = getDb().prepare(
+    "SELECT price_usd, scraped_at FROM price_history WHERE game_name = ? AND source = 'psstore-us' AND price_usd IS NOT NULL ORDER BY scraped_at ASC"
+  ).all(gameName);
+  if (!rows.length) return [];
+
+  const byDate = {};
+  for (const r of rows) {
+    const day = r.scraped_at.slice(0, 10);
+    if (!byDate[day] || r.price_usd < byDate[day]) byDate[day] = r.price_usd;
+  }
+  return Object.entries(byDate).map(([day, price]) => ({
+    price_usd: price, date_label: day, recorded_at: day,
+  }));
+}
+
+function savePriceDetailHistory(gameName, points) {
+  const db  = getDb();
+  const ins = db.prepare('INSERT INTO ps_price_history_detail (game_name, price_usd, date_label, recorded_at) VALUES (?, ?, ?, ?)');
+  const now = new Date().toISOString();
+  db.exec('BEGIN');
+  try {
+    for (const p of points) ins.run(gameName, p.price, p.date, now);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+function detectSaleDates(gameName) {
+  return getDb().prepare(
+    "SELECT scraped_at, price_usd FROM price_history WHERE game_name = ? AND source IN ('psdeals','psstore-us') AND discount_pct > 0 ORDER BY scraped_at ASC"
+  ).all(gameName).map(r => ({ date: r.scraped_at.slice(0, 10), price: r.price_usd }));
+}
+
+module.exports = {
+  getDb,
+  getSetting, setSetting,
+  getGiftCardRate, getArsToUsd, getAltRegion,
+  // game_catalog
+  getGameCatalog, getGameCatalogById,
+  addGameCatalogEntry, updateGameCatalogEntry,
+  setGameCatalogError, clearGameCatalogError,
+  validateGameCatalogEntry, excludeGameCatalogEntry,
+  countUnvalidated, setGameCatalogPSDealsData,
+  // legacy catalog
+  getCatalog, addToCatalog, removeFromCatalog, updateCatalogLang,
+  // lang cache
+  getLangCache, setLangCache,
+  // price history
+  recordPrice, getMinHistoricalPrice, getPriceDetailHistory,
+  savePriceDetailHistory, detectSaleDates,
+};

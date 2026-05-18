@@ -14,42 +14,75 @@ async function apiFetch(path, opts = {}) {
 
 export const api = {
   // Settings
-  getSettings:    ()        => apiFetch('/settings'),
-  saveSettings:   (body)    => apiFetch('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+  getSettings:  ()     => apiFetch('/settings'),
+  saveSettings: (body) => apiFetch('/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   // Search
-  search:         (q)       => apiFetch(`/search?q=${encodeURIComponent(q)}`),
+  search: (q) => apiFetch(`/search?q=${encodeURIComponent(q)}`),
 
   // Watchlist
-  getWatchlist:   ()        => apiFetch('/watchlist'),
-  addToWatchlist: (body)    => apiFetch('/watchlist', { method: 'POST', body: JSON.stringify(body) }),
-  removeFromWatchlist: (id) => apiFetch(`/watchlist/${id}`, { method: 'DELETE' }),
-  setAlert:       (id, body)=> apiFetch(`/watchlist/${id}/alert`, { method: 'PUT', body: JSON.stringify(body) }),
+  getWatchlist:        ()        => apiFetch('/watchlist'),
+  addToWatchlist:      (body)    => apiFetch('/watchlist', { method: 'POST', body: JSON.stringify(body) }),
+  removeFromWatchlist: (id)      => apiFetch(`/watchlist/${id}`, { method: 'DELETE' }),
+  setAlert:            (id, body)=> apiFetch(`/watchlist/${id}/alert`, { method: 'PUT', body: JSON.stringify(body) }),
 
   // Bulk
-  getBulk:        (params = {}) => {
+  getBulk: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return apiFetch(`/bulk${qs ? '?' + qs : ''}`);
   },
-  startBulkRefresh: ()     => apiFetch('/bulk/refresh', { method: 'POST' }),
-  getBulkStatus:    ()     => apiFetch('/bulk/status'),
+  startBulkRefresh: () => apiFetch('/bulk/refresh', { method: 'POST' }),
+  getBulkStatus:    () => apiFetch('/bulk/status'),
 
   // Alerts history
-  getAlerts:      ()        => apiFetch('/alerts'),
+  getAlerts: () => apiFetch('/alerts'),
 
-  // Price history (auto-persisted, reconnects on page load)
-  startHistoryFetch: ()    => apiFetch('/history/fetch', { method: 'POST' }),
-  getHistoryStatus:  ()    => apiFetch('/history/status'),  // returns { active, stats }
+  // Price history
+  startHistoryFetch: () => apiFetch('/history/fetch', { method: 'POST' }),
+  getHistoryStatus:  () => apiFetch('/history/status'),
 
-  // Catalog
-  getCatalog:       ()     => apiFetch('/catalog'),
-  addToCatalog:     (name) => apiFetch('/catalog', { method: 'POST', body: JSON.stringify({ name }) }),
-  removeFromCatalog:(id)   => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
-  updateCatalogLang:(id, spanishAudio, spanishText) => apiFetch(`/catalog/${id}/lang`, { method: 'PUT', body: JSON.stringify({ spanishAudio, spanishText }) }),
+  // ── Catalog (new game_catalog system) ─────────────────────────────────────
+  /** List all non-excluded catalog entries */
+  getCatalog: (all = false) => apiFetch(`/catalog${all ? '?all=1' : ''}`),
 
-  // PlatPrices — price history seed
-  getPlatPricesStatus: ()  => apiFetch('/platprices/status'),
-  startPlatPricesSeed: ()  => apiFetch('/platprices/seed', { method: 'POST' }),
+  /** Count of entries with no validated_at */
+  getUnvalidatedCount: () => apiFetch('/catalog/unvalidated-count'),
+
+  /** Preview editions from Sony US before adding — returns { editions: [...] } */
+  previewCatalogAdd: (name) => apiFetch('/catalog/preview', {
+    method: 'POST', body: JSON.stringify({ name }),
+  }),
+
+  /** Confirm and add selected editions to the catalog */
+  confirmCatalogAdd: (editions) => apiFetch('/catalog/add', {
+    method: 'POST', body: JSON.stringify({ editions }),
+  }),
+
+  /** Mark a catalog entry as validated by user */
+  validateCatalogEntry: (id) => apiFetch(`/catalog/validate/${id}`, { method: 'POST' }),
+
+  /** Update any fields on a catalog entry (URLs, confidence, etc.) */
+  updateCatalogEntry: (id, data) => apiFetch(`/catalog/${id}`, {
+    method: 'PUT', body: JSON.stringify(data),
+  }),
+
+  /** Exclude (soft-delete) a catalog entry */
+  removeCatalogEntry: (id) => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
+
+  /** Legacy quick-add (no edition expansion) */
+  addToCatalog: (name) => apiFetch('/catalog', {
+    method: 'POST', body: JSON.stringify({ name }),
+  }),
+
+  /** Backward compat */
+  removeFromCatalog: (id) => apiFetch(`/catalog/${id}`, { method: 'DELETE' }),
+
+  /** Re-search alt region for all catalog entries (background job) */
+  reSearchAltRegion: () => apiFetch('/catalog/re-search-alt-region', { method: 'POST' }),
+
+  // ── PlatPrices (kept for potential future use, UI removed per TASK 8) ─────
+  // getPlatPricesStatus: () => apiFetch('/platprices/status'),
+  // startPlatPricesSeed: () => apiFetch('/platprices/seed', { method: 'POST' }),
 };
 
 export function createProgressStream(batchId, onMessage) {
@@ -70,6 +103,7 @@ export function createHistoryStream(jobId, onMessage) {
   return () => es.close();
 }
 
+// PlatPrices stream kept for backward compat but unused by UI
 export function createPlatPricesStream(jobId, onMessage) {
   const es = new EventSource(`/api/platprices/progress/${jobId}`);
   es.onmessage = (e) => {

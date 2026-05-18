@@ -22,9 +22,7 @@ function parseUsdPrice(text) {
   return isNaN(num) || num === 0 ? null : num;
 }
 
-// GamesturkeyACC is a PHP server-rendered site. Product cards are identified
-// by their "product_details" links. Each card div contains an h3 (title) and
-// a span with class "text-primary font-bold" (price).
+// Extract products from a search-results or category page
 function extractProducts(html) {
   const $        = cheerio.load(html);
   const products = [];
@@ -35,7 +33,6 @@ function extractProducts(html) {
     if (!href || seenHrefs.has(href)) return;
     seenHrefs.add(href);
 
-    // Walk up until we find a container that has an h3 (the product card)
     let $card = $(linkEl).parent();
     let depth = 0;
     while ($card.length && !$card.find('h3').length && depth < 6) {
@@ -47,25 +44,78 @@ function extractProducts(html) {
     const title    = $card.find('h3').first().text().trim();
     if (!title) return;
 
-    // Price is in a span that contains "$"
     const priceRaw = $card.find('span').filter((_, s) => $(s).text().includes('$'))
                           .first().text().trim();
 
     const url = href.startsWith('http') ? href : `${BASE}/${href.replace(/^\//, '')}`;
-
-    products.push({
-      title,
-      priceUsd: parseUsdPrice(priceRaw),
-      priceRaw,
-      url,
-    });
+    products.push({ title, priceUsd: parseUsdPrice(priceRaw), priceRaw, url });
   });
 
   return products;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SEARCH — fuzzy match a single game
+//  NEW: fetchTurkeyPriceByUrl — fetch live price from a stored product detail URL
+//  Returns: { priceUsd, priceRaw, spanishAudio, spanishText } or null
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchTurkeyPriceByUrl(url) {
+  if (!url) return null;
+  try {
+    const html = await getHtml(url);
+    const $    = cheerio.load(html);
+
+    // ── Price extraction ─────────────────────────────────────────────────────
+    let priceUsd = null;
+    let priceRaw = null;
+
+    // Strategy 1: span with class containing "text-primary" and "font-bold" (existing scraper uses this)
+    const primaryBold = $('span.text-primary.font-bold, span[class*="text-primary"][class*="font-bold"]')
+      .filter((_, el) => /\$\s*[\d]/.test($(el).text())).first();
+    if (primaryBold.length) {
+      priceRaw = primaryBold.text().trim();
+      priceUsd = parseUsdPrice(priceRaw);
+    }
+
+    // Strategy 2: any span containing $price
+    if (!priceUsd) {
+      $('span, p, div').filter((_, el) => /\$\s*[\d]/.test($(el).text())).each((_, el) => {
+        if (priceUsd) return;
+        const text = $(el).text().trim().split('\n')[0].trim();
+        const parsed = parseUsdPrice(text);
+        if (parsed && parsed > 0.5 && parsed < 1000) {
+          priceUsd = parsed;
+          priceRaw = text;
+        }
+      });
+    }
+
+    // Strategy 3: regex on raw HTML
+    if (!priceUsd) {
+      const m = html.match(/\$\s*([\d]+\.?[\d]{0,2})/);
+      if (m) {
+        priceUsd = parseFloat(m[1]);
+        priceRaw = `$${m[1]}`;
+      }
+    }
+
+    // ── Language detection ───────────────────────────────────────────────────
+    const spanishAudio = /<strong[^>]*>\s*(?:Audio|Voice)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+    const spanishText  = /<strong[^>]*>\s*(?:Interface|Text|Subtitle)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
+
+    if (!priceUsd) {
+      console.warn(`[gamesturkey] fetchTurkeyPriceByUrl: no price at ${url}`);
+      return null;
+    }
+
+    return { priceUsd, priceRaw, spanishAudio, spanishText };
+  } catch (err) {
+    console.warn(`[gamesturkey] fetchTurkeyPriceByUrl error for ${url}:`, err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SEARCH — fuzzy match a single game, returns with confidence score
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchGamesTurkey(query) {
   try {
@@ -74,12 +124,13 @@ async function searchGamesTurkey(query) {
 
     if (!products.length) return { found: false, query };
 
-    const fuse = new Fuse(products, { keys: ['title'], threshold: 0.4 });
-    const hits = fuse.search(query);
+    const fuse = new Fuse(products, { keys: ['title'], threshold: 0.4, includeScore: true });
+    const hits  = fuse.search(query);
     if (!hits.length) return { found: false, query };
 
-    const best = hits[0].item;
-    return { found: true, ...best };
+    const best       = hits[0];
+    const confidence = Math.round((1 - (best.score ?? 0)) * 100);
+    return { found: true, ...best.item, turkey_confidence: Math.min(100, confidence) };
   } catch (err) {
     console.error('GamesturkeyACC search error:', err.message);
     return { found: false, query, error: err.message };
@@ -87,16 +138,16 @@ async function searchGamesTurkey(query) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BULK — scrape all category pages (single page each, no pagination needed)
+//  BULK — scrape all category pages
 // ─────────────────────────────────────────────────────────────────────────────
-// Try all category IDs from 1-30 — empty ones return nothing and are skipped
-async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30], onProgress) {
+async function scrapeAllProducts(
+  categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30],
+  onProgress
+) {
   const allProducts = [];
   const seenUrls    = new Set();
 
   for (const catId of categoryIds) {
-    // Each category loads all its products server-side on one page.
-    // We still try a second page in case the site adds pagination later.
     for (let page = 1; page <= 5; page++) {
       const url = page === 1
         ? `${BASE}/product_category.php?category_id=${catId}`
@@ -105,7 +156,6 @@ async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14
       try {
         const html  = await getHtml(url);
         const items = extractProducts(html);
-
         if (!items.length) break;
 
         let added = 0;
@@ -115,10 +165,7 @@ async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14
           allProducts.push({ ...item, categoryId: catId });
           added++;
         }
-
         if (onProgress) onProgress({ category: catId, page, total: allProducts.length, status: 'gamesturkey' });
-
-        // If we got nothing new or fewer than 10 items, stop paginating
         if (added === 0 || items.length < 10) break;
       } catch (err) {
         console.warn(`GamesturkeyACC cat=${catId} page=${page}:`, err.message);
@@ -131,14 +178,14 @@ async function scrapeAllProducts(categoryIds = [1,2,3,4,5,6,7,8,9,10,11,12,13,14
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Scrape a single product detail page for Spanish language support
-//  Structure: <strong>Audio:</strong> English, French, Spanish, ...
-//             <strong>Interface:</strong> ...  <strong>Subtitles:</strong> ...
+//  Scrape a single product detail page for Spanish language support + price
 // ─────────────────────────────────────────────────────────────────────────────
 async function scrapeProductLang(url) {
   try {
+    const result = await fetchTurkeyPriceByUrl(url);
+    if (result) return { spanishAudio: result.spanishAudio, spanishText: result.spanishText };
+    // If price fetch returned null, still try language detection
     const html = await getHtml(url);
-    // <strong> tags have class attributes: <strong class="...">Audio:</strong> English, ..., Spanish, ...
     const spanishAudio = /<strong[^>]*>\s*(?:Audio|Voice)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
     const spanishText  = /<strong[^>]*>\s*(?:Interface|Text|Subtitle)[^<]*<\/strong>[^<\n]*Spanish/i.test(html);
     return { spanishAudio, spanishText };
@@ -147,4 +194,10 @@ async function scrapeProductLang(url) {
   }
 }
 
-module.exports = { searchGamesTurkey, scrapeAllProducts, scrapeProductLang };
+module.exports = {
+  searchGamesTurkey,
+  scrapeAllProducts,
+  scrapeProductLang,
+  fetchTurkeyPriceByUrl,
+  extractProducts,
+};

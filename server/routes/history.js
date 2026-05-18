@@ -1,8 +1,9 @@
-const express = require('express');
-const router  = express.Router();
+const express  = require('express');
+const router   = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { fetchHistoryBatch } = require('../scrapers/psdeals-history');
-const { getDb, savePriceDetailHistory } = require('../db/database');
+
+const { fetchHistoryBatch }      = require('../scrapers/psdeals-history');
+const { getDb, savePriceDetailHistory, setGameCatalogPSDealsData } = require('../db/database');
 
 const progressClients = new Map();
 let activeJob = null;
@@ -16,7 +17,6 @@ function broadcastProgress(jobId, data) {
   }
 }
 
-// Persist activeJob to settings so frontend can reconnect after page reload
 function persistJobState(state) {
   try {
     getDb().prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
@@ -32,15 +32,13 @@ function clearPersistedJob() {
 router.get('/status', (_req, res) => {
   const db = getDb();
 
-  // Recover persisted job state if server was restarted mid-job
   if (!activeJob) {
     try {
       const row = db.prepare("SELECT value FROM settings WHERE key = 'history_active_job'").get();
       if (row) {
         const saved = JSON.parse(row.value);
-        // If it was "running" at server restart, mark it interrupted
         if (saved.status === 'running') {
-          saved.status = 'interrupted';
+          saved.status  = 'interrupted';
           saved.message = '⚠️ Job interrumpido por restart — podés relanzarlo';
           clearPersistedJob();
         }
@@ -49,24 +47,33 @@ router.get('/status', (_req, res) => {
     } catch (_) {}
   }
 
-  // Stats: count from both psdeals detail table and our own psstore-us records
+  // Stats from game_catalog (new system) + legacy tables
   let stats = null;
   try {
-    const total = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM bulk_results WHERE batch_id = (SELECT batch_id FROM bulk_results ORDER BY scraped_at DESC LIMIT 1)').get();
-    const withPsdeals = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM ps_price_history_detail').get();
-    const withOwn     = db.prepare("SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'").get();
-    const lastRun = db.prepare("SELECT value FROM settings WHERE key = 'history_last_completed'").get();
+    const total = db.prepare(
+      'SELECT COUNT(*) as n FROM game_catalog WHERE excluded=0'
+    ).get();
+    const withPSDeals = db.prepare(
+      'SELECT COUNT(*) as n FROM game_catalog WHERE excluded=0 AND min_price_usd_alltime IS NOT NULL'
+    ).get();
+    const withOwn = db.prepare(
+      "SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'"
+    ).get();
+    const lastRun = db.prepare(
+      "SELECT value FROM settings WHERE key = 'history_last_completed'"
+    ).get();
     stats = {
-      totalGames:       total?.n || 0,
-      gamesWithHistory: Math.max(withPsdeals?.n || 0, withOwn?.n || 0),
-      lastCompleted:    lastRun?.value || null,
+      totalGames:       total?.n      || 0,
+      gamesWithHistory: withPSDeals?.n || 0,
+      ownHistory:       withOwn?.n     || 0,
+      lastCompleted:    lastRun?.value  || null,
     };
   } catch (_) {}
 
   res.json({ active: activeJob, stats });
 });
 
-// ── GET /api/history/progress/:jobId — SSE stream ───────────────────────────
+// ── GET /api/history/progress/:jobId — SSE ──────────────────────────────────
 router.get('/progress/:jobId', (req, res) => {
   const { jobId } = req.params;
   res.setHeader('Content-Type', 'text/event-stream');
@@ -76,12 +83,11 @@ router.get('/progress/:jobId', (req, res) => {
 
   if (!progressClients.has(jobId)) progressClients.set(jobId, new Set());
   progressClients.get(jobId).add(res);
-  // Send current state immediately so client catches up
   if (activeJob) res.write(`data: ${JSON.stringify(activeJob)}\n\n`);
   req.on('close', () => progressClients.get(jobId)?.delete(res));
 });
 
-// ── POST /api/history/fetch — start job via HTTP ─────────────────────────────
+// ── POST /api/history/fetch — start job manually ─────────────────────────────
 router.post('/fetch', (req, res) => {
   if (activeJob?.status === 'running') {
     return res.status(409).json({ error: 'Ya hay un job de historial en curso', jobId: activeJob.id });
@@ -90,7 +96,7 @@ router.post('/fetch', (req, res) => {
   res.json({ jobId });
 });
 
-// ── Exported function for programmatic triggering (e.g. after bulk refresh) ──
+// ── Exported for programmatic triggering ──────────────────────────────────────
 function startHistoryJob(triggeredBy = 'manual') {
   if (activeJob?.status === 'running') return activeJob.id;
 
@@ -125,53 +131,68 @@ async function runHistoryFetch(jobId) {
     persistJobState(activeJob);
     broadcastProgress(jobId, activeJob);
   };
-  const db = getDb();
+  const db          = getDb();
   const triggeredBy = activeJob?.triggeredBy || 'manual';
 
-  // ── Auto-trigger (after bulk refresh): just report stats, no Playwright ──────
+  // ── Auto-trigger (after bulk refresh): just report stats ──────────────────
   if (triggeredBy === 'auto-after-bulk') {
     emit({ message: 'Calculando estadísticas de historial...', progress: 50 });
 
-    const withDetail  = db.prepare('SELECT COUNT(DISTINCT game_name) as n FROM ps_price_history_detail').get()?.n || 0;
-    const withOwn     = db.prepare("SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'").get()?.n || 0;
-    const totalPoints = db.prepare("SELECT COUNT(*) as n FROM price_history WHERE source='psstore-us'").get()?.n || 0;
-    const oldestEntry = db.prepare("SELECT MIN(scraped_at) as d FROM price_history WHERE source='psstore-us'").get()?.d;
-    const since       = oldestEntry ? oldestEntry.slice(0, 10) : '—';
+    const withDetail = db.prepare(
+      'SELECT COUNT(*) as n FROM game_catalog WHERE excluded=0 AND min_price_usd_alltime IS NOT NULL'
+    ).get()?.n || 0;
+    const withOwn = db.prepare(
+      "SELECT COUNT(DISTINCT game_name) as n FROM price_history WHERE source='psstore-us'"
+    ).get()?.n || 0;
+    const totalPoints = db.prepare(
+      "SELECT COUNT(*) as n FROM price_history WHERE source='psstore-us'"
+    ).get()?.n || 0;
+    const oldestEntry = db.prepare(
+      "SELECT MIN(scraped_at) as d FROM price_history WHERE source='psstore-us'"
+    ).get()?.d;
+    const since = oldestEntry ? oldestEntry.slice(0, 10) : '—';
 
     const now = new Date().toISOString();
     try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
 
     activeJob = {
       id: jobId, status: 'done', progress: 100, saved: withDetail,
-      message: `📊 ${withOwn} juegos con historial propio desde ${since} — ${withDetail} con historial PSDeals — ${totalPoints} registros. Hacé click en "Actualizar historial" para agregar más.`,
+      message: `📊 ${withOwn} juegos con historial propio desde ${since} — ${withDetail} con datos PSDeals — ${totalPoints} registros. Hacé click en "Actualizar historial" para agregar más.`,
     };
     broadcastProgress(jobId, activeJob);
     clearPersistedJob();
-    setTimeout(() => { progressClients.delete(jobId); }, 60000);
+    setTimeout(() => progressClients.delete(jobId), 60000);
     return;
   }
 
-  // ── Manual trigger: scrape PSDeals history with Playwright for games missing it ──
+  // ── Manual trigger: scrape PSDeals for catalog entries missing min_hist ────
   emit({ message: '📋 Buscando juegos sin historial PSDeals...', progress: 5 });
 
-  // Find catalog games that don't have PSDeals history yet
-  const allCatalog = db.prepare('SELECT name FROM catalog WHERE active=1').all().map(r => r.name);
-  const withHistory = new Set(
-    db.prepare('SELECT DISTINCT game_name FROM ps_price_history_detail').all().map(r => r.game_name)
-  );
-  const needHistory = allCatalog.filter(name => !withHistory.has(name));
+  // Find catalog entries that don't have PSDeals history yet
+  // Prioritize: no min_price OR psdeals_last_checked older than 30 days
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const needHistory = db.prepare(`
+    SELECT id, display_name, psdeals_url
+    FROM game_catalog
+    WHERE excluded=0
+      AND (min_price_usd_alltime IS NULL OR psdeals_last_checked < ?)
+    ORDER BY display_name ASC
+  `).all(thirtyDaysAgo);
 
   if (needHistory.length === 0) {
+    const withHistory = db.prepare(
+      'SELECT COUNT(*) as n FROM game_catalog WHERE excluded=0 AND min_price_usd_alltime IS NOT NULL'
+    ).get()?.n || 0;
     const now = new Date().toISOString();
     try { db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('history_last_completed', now); } catch (_) {}
 
     activeJob = {
-      id: jobId, status: 'done', progress: 100, saved: withHistory.size,
-      message: `✅ Todos los juegos ya tienen historial PSDeals (${withHistory.size} juegos).`,
+      id: jobId, status: 'done', progress: 100, saved: withHistory,
+      message: `✅ Todos los juegos ya tienen historial PSDeals actualizado (${withHistory} juegos).`,
     };
     broadcastProgress(jobId, activeJob);
     clearPersistedJob();
-    setTimeout(() => { progressClients.delete(jobId); }, 60000);
+    setTimeout(() => progressClients.delete(jobId), 60000);
     return;
   }
 
@@ -179,7 +200,8 @@ async function runHistoryFetch(jobId) {
 
   let saved = 0;
   try {
-    const results = await fetchHistoryBatch(needHistory, (prog) => {
+    const gameNames = needHistory.map(e => e.display_name);
+    const results   = await fetchHistoryBatch(gameNames, (prog) => {
       const pct = 8 + Math.round((prog.done / prog.total) * 87);
       emit({
         message:  `PSDeals — ${prog.done}/${prog.total} | ${prog.current}`,
@@ -188,15 +210,40 @@ async function runHistoryFetch(jobId) {
       });
     });
 
-    // Persist fetched history to ps_price_history_detail
-    for (const { name, history } of results) {
-      if (history.length > 0) {
-        try {
-          savePriceDetailHistory(name, history.map(h => ({ price: h.priceUsd, date: h.date })));
-          saved++;
-        } catch (err) {
-          console.warn(`[history] Save failed for "${name}": ${err.message}`);
-        }
+    // Store results in both game_catalog (new) and ps_price_history_detail (legacy)
+    for (let i = 0; i < results.length; i++) {
+      const { name, history, gameUrl } = results[i];
+      const catalogEntry = needHistory[i];
+
+      if (!history || history.length === 0) continue;
+
+      try {
+        // Compute aggregates for game_catalog
+        const prices    = history.map(h => h.priceUsd).filter(p => p > 0);
+        const minPrice  = prices.length ? Math.min(...prices) : null;
+        const minEntry  = minPrice ? history.find(h => h.priceUsd === minPrice) : null;
+
+        // Detect current sale (most recent price that seems discounted)
+        const sortedHistory = [...history].sort((a, b) => b.date.localeCompare(a.date));
+        const latestPrice   = sortedHistory[0]?.priceUsd ?? null;
+        const secondPrice   = sortedHistory.find(h => h.priceUsd !== latestPrice)?.priceUsd ?? null;
+        const isOnSale      = latestPrice && secondPrice && latestPrice < secondPrice;
+        const currentSalePrice = isOnSale ? latestPrice : null;
+
+        // Store in game_catalog
+        setGameCatalogPSDealsData(catalogEntry.id, {
+          psdeals_url:            gameUrl || catalogEntry.psdeals_url,
+          min_price_usd_alltime:  minPrice,
+          min_price_date:         minEntry?.date || null,
+          current_sale_price_usd: currentSalePrice,
+          current_sale_end_date:  null, // PSDeals history doesn't give end dates directly
+        });
+
+        // Also store raw points in legacy table (for chart in SearchTab)
+        savePriceDetailHistory(name, history.map(h => ({ price: h.priceUsd, date: h.date })));
+        saved++;
+      } catch (err) {
+        console.warn(`[history] Save failed for "${name}": ${err.message}`);
       }
     }
   } catch (err) {
@@ -209,11 +256,11 @@ async function runHistoryFetch(jobId) {
 
   activeJob = {
     id: jobId, status: 'done', progress: 100, saved,
-    message: `✅ Historial guardado para ${saved}/${needHistory.length} juegos nuevos`,
+    message: `✅ Historial PSDeals guardado para ${saved}/${needHistory.length} juegos`,
   };
   broadcastProgress(jobId, activeJob);
   clearPersistedJob();
-  setTimeout(() => { progressClients.delete(jobId); }, 60000);
+  setTimeout(() => progressClients.delete(jobId), 60000);
 }
 
 module.exports = router;

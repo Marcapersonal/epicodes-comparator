@@ -1,12 +1,23 @@
 const express = require('express');
 const router  = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const Fuse = require('fuse.js');
-const { bulkLookup }                    = require('../scrapers/psstore');
-const { scrapeAllProducts, scrapeProductLang } = require('../scrapers/gamesturkey');
-const { getVerdict }                    = require('../services/comparison');
-const { getDb, getGiftCardRate, getMinHistoricalPrice, getCatalog, recordPrice, getLangCache, setLangCache } = require('../db/database');
-// Lazy-loaded to prevent playwright-extra/stealth from patching Node internals at startup
+
+const {
+  getDb,
+  getGameCatalog,
+  getGiftCardRate,
+  getAltRegion,
+  setGameCatalogError,
+  clearGameCatalogError,
+  updateGameCatalogEntry,
+  recordPrice,
+} = require('../db/database');
+
+const { getVerdict }           = require('../services/comparison');
+const { fetchSonyPriceByUrl, bulkLookup } = require('../scrapers/psstore');
+const { fetchTurkeyPriceByUrl }           = require('../scrapers/gamesturkey');
+
+// Lazy-load history route to avoid playwright-extra patching Node at startup
 let _historyRoute = null;
 function getHistoryRoute() { return _historyRoute || (_historyRoute = require('./history')); }
 
@@ -44,50 +55,42 @@ router.get('/', (req, res) => {
 
   const rows = db.prepare(query).all(...params);
 
-  // Enrich rows with PlatPrices cache data (keyed by catalog_name)
-  // Load the entire cache once and join in JS — avoids a complex LEFT JOIN
-  // Also use PlatPrices sale_price_usd + PSDeals historical data to correct min_hist_usd
-  // for existing rows (fixes DLC-contaminated minimums and adds external historical data)
-  let ppMap = {};
+  // Enrich with game_catalog data (min_hist, sale dates, alt region price, validation status)
+  let gcMap = {};
   try {
-    const ppRows = db.prepare(
-      'SELECT game_name, last_discounted, discount_until, discount_pct, sale_price_usd FROM platprices_cache'
-    ).all();
-    for (const r of ppRows) ppMap[r.game_name.toLowerCase()] = r;
-  } catch (_) {}
-
-  // PSDeals historical min per game (populated by the manual "Actualizar historial" job)
-  let psdealsMinMap = {};
-  try {
-    const psdealsRows = db.prepare(
-      'SELECT game_name, MIN(price_usd) as min_price FROM ps_price_history_detail WHERE price_usd > 0 GROUP BY game_name'
-    ).all();
-    for (const r of psdealsRows) psdealsMinMap[r.game_name.toLowerCase()] = r.min_price;
+    const gcRows = db.prepare('SELECT * FROM game_catalog WHERE excluded=0').all();
+    for (const r of gcRows) gcMap[r.display_name?.toLowerCase()] = r;
   } catch (_) {}
 
   const enriched = rows.map(r => {
-    const key    = (r.catalog_name || r.game_name || '').toLowerCase();
-    const pp     = ppMap[key];
-    const pdMin  = psdealsMinMap[key] ?? null;
+    const key = (r.catalog_name || r.game_name || '').toLowerCase();
+    const gc  = gcMap[key] || gcMap[(r.game_name || '').toLowerCase()] || null;
 
-    // Start with stored value; replace if contaminated (< $1)
+    // Corrected min_hist from game_catalog PSDeals data (most authoritative)
     let minHistUsd = (r.min_hist_usd != null && r.min_hist_usd >= 1.0) ? r.min_hist_usd : null;
-
-    // Layer 1: PSDeals Highcharts history (most accurate historical data)
-    if (pdMin != null && (minHistUsd == null || pdMin < minHistUsd)) {
-      minHistUsd = pdMin;
-    }
-    // Layer 2: PlatPrices best-known sale price
-    if (pp?.sale_price_usd != null && (minHistUsd == null || pp.sale_price_usd < minHistUsd)) {
-      minHistUsd = pp.sale_price_usd;
+    if (gc?.min_price_usd_alltime != null && (minHistUsd == null || gc.min_price_usd_alltime < minHistUsd)) {
+      minHistUsd = gc.min_price_usd_alltime;
     }
 
     return {
       ...r,
-      min_hist_usd:       minHistUsd,
-      pp_last_discounted: pp?.last_discounted ?? null,
-      pp_discount_until:  pp?.discount_until  ?? null,
-      pp_discount_pct:    pp?.discount_pct    ?? null,
+      min_hist_usd:           minHistUsd,
+      min_price_date:         gc?.min_price_date         ?? null,
+      current_sale_price_usd: gc?.current_sale_price_usd ?? null,
+      current_sale_end_date:  gc?.current_sale_end_date  ?? null,
+      // Validation state
+      validated_at:           gc?.validated_at            ?? null,
+      validated_by:           gc?.validated_by            ?? null,
+      last_error:             gc?.last_error              ?? null,
+      sony_us_confidence:     gc?.sony_us_confidence      ?? null,
+      turkey_confidence:      gc?.turkey_confidence       ?? null,
+      // Alt region
+      sony_alt_url:           r.sony_alt_url || gc?.sony_alt_url   || null,
+      sony_alt_region:        r.sony_alt_region || gc?.sony_alt_region || null,
+      // PSDeals
+      psdeals_url:            gc?.psdeals_url ?? null,
+      // Turkey URL (from bulk_results — already stored)
+      turkey_url:             r.turkey_url || gc?.turkey_url || null,
     };
   });
 
@@ -132,7 +135,7 @@ router.post('/refresh', (req, res) => {
       broadcastProgress(batchId, activeBatch);
       setTimeout(() => progressClients.delete(batchId), 10000);
     }
-  }, 8 * 60 * 1000);
+  }, 10 * 60 * 1000); // 10 min timeout
 
   runBulkScrape(batchId)
     .catch(err => {
@@ -144,198 +147,242 @@ router.post('/refresh', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
 async function runBulkScrape(batchId) {
   const emit = (data) => { Object.assign(activeBatch, data); broadcastProgress(batchId, activeBatch); };
-  const b = (v) => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
+  const b    = (v)    => (v === undefined || (typeof v === 'number' && isNaN(v))) ? null : v;
 
-  // STEP 1 — Load user's catalog from DB
-  emit({ message: '📋 Cargando catálogo de juegos...', progress: 5 });
-  const catalog = getCatalog();
+  // ── Step 1: Load game_catalog ─────────────────────────────────────────────
+  emit({ message: '📋 Cargando catálogo validado...', progress: 3 });
+  const catalog = getGameCatalog();
   if (!catalog.length) {
     activeBatch = { id: batchId, status: 'error', message: '❌ El catálogo está vacío. Agregá juegos desde el panel de catálogo.' };
     broadcastProgress(batchId, activeBatch);
     return;
   }
 
-  // STEP 2 — Scrape GamesturkeyACC for Turkey prices
-  emit({ message: '🇹🇷 Scrapeando precios de GamesturkeyACC...', progress: 8 });
-  let turkeyProducts = [];
-  try {
-    turkeyProducts = await scrapeAllProducts(undefined, (prog) => {
-      emit({ message: `GamesturkeyACC — ${prog.total} productos`, progress: 8 + Math.min(prog.total / 3, 12) });
-    });
-  } catch (err) {
-    console.error('GamesturkeyACC error:', err.message);
-    emit({ message: `⚠️ GamesturkeyACC falló: ${err.message}`, progress: 20 });
-  }
+  const giftCardRate = getGiftCardRate();
+  const altRegion    = getAltRegion();
+  const db           = getDb();
+  const now          = new Date().toISOString();
 
-  // STEP 3 — Build Turkey Fuse index
-  const fuseT = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.45 });
+  // Partition: entries with stored URLs vs those needing a search fallback
+  const withSonyUrl    = catalog.filter(e => e.sony_us_url);
+  const withoutSonyUrl = catalog.filter(e => !e.sony_us_url);
 
-  // STEP 3.5 — Fetch Spanish language support from GamesturkeyACC detail pages (cached)
-  // Clear stale cache entries that were stored with the broken regex (all false)
-  try {
-    getDb().exec("DELETE FROM lang_cache WHERE spanish_audio = 0 AND spanish_text = 0 AND checked_at < datetime('now', '-1 hour')");
-  } catch (_) {}
-  emit({ message: '🌐 Verificando soporte de español en GamesturkeyACC...', progress: 14 });
-  const langByUrl = {};
-  const uniqueUrls = [...new Set(turkeyProducts.map(p => p.url).filter(Boolean))];
-  const uncachedUrls = uniqueUrls.filter(url => {
-    const cached = getLangCache(url);
-    if (cached) { langByUrl[url] = cached; return false; }
-    return true;
+  emit({
+    message: `📋 ${catalog.length} juegos | ${withSonyUrl.length} con URL guardada | ${withoutSonyUrl.length} sin URL`,
+    progress: 5,
   });
 
-  if (uncachedUrls.length > 0) {
-    const LANG_CONCURRENCY = 4;
-    let langDone = 0;
-    async function langWorker(url) {
-      const lang = await scrapeProductLang(url);
-      langByUrl[url] = lang;
-      setLangCache(url, lang.spanishAudio, lang.spanishText);
-      langDone++;
-      if (langDone % 15 === 0 || langDone === uncachedUrls.length) {
-        emit({ message: `🌐 Idiomas: ${langDone + uniqueUrls.length - uncachedUrls.length}/${uniqueUrls.length} verificados`, progress: 14 + Math.round(langDone / uncachedUrls.length * 5) });
-      }
-      await delay(100 + Math.random() * 150);
-    }
-    let langCursor = 0;
-    async function langNext() {
-      if (langCursor >= uncachedUrls.length) return;
-      const url = uncachedUrls[langCursor++];
-      await langWorker(url);
-      await langNext();
-    }
-    await Promise.all(Array.from({ length: Math.min(LANG_CONCURRENCY, uncachedUrls.length) }, langNext));
-  }
-  emit({ message: `✅ ${uniqueUrls.length} productos Turkey | ${Object.values(langByUrl).filter(l => l.spanishAudio).length} con audio ES | ${Object.values(langByUrl).filter(l => l.spanishText).length} con texto ES`, progress: 20 });
+  // ── Step 2: Fetch prices for entries WITH stored URLs ─────────────────────
+  // Run in parallel batches (concurrency 5 — these are targeted fetches, not searches)
+  const CONCURRENCY = 5;
+  const urlResults = {};
 
-  // STEP 4 — Lookup each catalog game on PS Store US
-  let psResults;
-  try {
-    psResults = await bulkLookup(catalog.map(g => g.name), (prog) => {
-      const pct = 20 + Math.round((prog.completed / prog.total) * 65);
-      emit({ message: `PS Store US — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
-      // Log any per-game errors so they appear in Railway logs
-      if (prog.error) {
-        console.error(`[bulk] PS Store error for "${prog.current}": ${prog.error}`);
-      }
+  async function fetchByUrlWorker(entry) {
+    const [sony, turkey] = await Promise.allSettled([
+      entry.sony_us_url ? fetchSonyPriceByUrl(entry.sony_us_url) : Promise.resolve(null),
+      entry.turkey_url  ? fetchTurkeyPriceByUrl(entry.turkey_url) : Promise.resolve(null),
+    ]);
+    const sonyResult   = sony.status   === 'fulfilled' ? sony.value   : null;
+    const turkeyResult = turkey.status === 'fulfilled' ? turkey.value : null;
+
+    // Clear or set error on catalog entry
+    if (entry.sony_us_url && !sonyResult) {
+      setGameCatalogError(entry.id, 'Sony URL sin precio — ¿link roto?');
+    } else if (sonyResult) {
+      clearGameCatalogError(entry.id);
+    }
+
+    return { entry, sonyResult, turkeyResult };
+  }
+
+  let urlDone = 0;
+  const urlQueue = [...withSonyUrl];
+  let urlCursor  = 0;
+
+  async function urlNext() {
+    if (urlCursor >= urlQueue.length) return;
+    const entry  = urlQueue[urlCursor++];
+    const result = await fetchByUrlWorker(entry);
+    urlResults[entry.id] = result;
+    urlDone++;
+    const pct = 5 + Math.round((urlDone / Math.max(withSonyUrl.length, 1)) * 45);
+    emit({ message: `🔗 Precios por URL — ${urlDone}/${withSonyUrl.length} | ${entry.display_name}`, progress: pct });
+    await delay(150 + Math.random() * 100);
+    await urlNext();
+  }
+
+  if (withSonyUrl.length > 0) {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, withSonyUrl.length) }, urlNext));
+  }
+
+  // ── Step 3: Search fallback for entries WITHOUT stored URLs ───────────────
+  // Uses existing bulkLookup — same as old behavior
+  let searchResults = {};
+  if (withoutSonyUrl.length > 0) {
+    emit({ message: `🔍 Buscando ${withoutSonyUrl.length} juegos sin URL guardada en PS Store...`, progress: 52 });
+    const names    = withoutSonyUrl.map(e => e.display_name);
+    let   srDone   = 0;
+    const rawResults = await bulkLookup(names, (prog) => {
+      srDone = prog.completed;
+      const pct = 52 + Math.round((prog.completed / prog.total) * 25);
+      emit({ message: `🔍 PS Store — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
     });
-  } catch (err) {
-    console.error('[bulk] bulkLookup threw unexpectedly:', err.message, err.stack);
-    // Return { found: false } for every game so the scrape still completes
-    psResults = catalog.map(g => ({ title: g.name, best: null, variants: [], error: err.message }));
-    emit({ message: `⚠️ PS Store falló globalmente: ${err.message} — continuando sin precios US`, progress: 87 });
+    // rawResults is array aligned with names
+    for (let i = 0; i < withoutSonyUrl.length; i++) {
+      searchResults[withoutSonyUrl[i].id] = rawResults[i];
+    }
   }
 
-  emit({ message: '💾 Cruzando datos y guardando...', progress: 87 });
+  // ── Step 4: For URL-entries, also fetch alt-region price if available ──────
+  // (Do this in background after main results are ready — don't block the scrape)
+  // Alt region prices are fetched from stored sony_alt_url
+  const altPrices = {};
+  const altEntries = withSonyUrl.filter(e => e.sony_alt_url);
+  if (altEntries.length > 0) {
+    emit({ message: `🌍 Obteniendo precios de región ${altRegion}...`, progress: 78 });
+    let altDone = 0;
+    for (const entry of altEntries) {
+      try {
+        const altResult = await fetchSonyPriceByUrl(entry.sony_alt_url);
+        if (altResult) altPrices[entry.id] = altResult;
+      } catch (_) {}
+      altDone++;
+      if (altDone % 5 === 0) {
+        emit({ message: `🌍 Región ${altRegion} — ${altDone}/${altEntries.length}`, progress: 78 + Math.round(altDone / altEntries.length * 5) });
+      }
+      await delay(100);
+    }
+  }
 
-  // STEP 5 — Cross-match and compute verdicts — ONE ROW PER EDITION
-  const giftCardRate = getGiftCardRate();
-  const db  = getDb();
-  const now = new Date().toISOString();
-
-  // Per-edition Turkey fuzzy matcher (slightly stricter threshold)
-  const fuseEdition = new Fuse(turkeyProducts, { keys: ['title'], threshold: 0.40 });
+  // ── Step 5: Cross-match and save ─────────────────────────────────────────
+  emit({ message: '💾 Cruzando datos y guardando...', progress: 85 });
 
   const insertBulk = db.prepare(`
     INSERT INTO bulk_results
       (batch_id, catalog_name, game_name, ps_price_usd, ps_price_raw, ps_discount_pct, ps_sale_end,
        turkey_price, turkey_url, real_cost_usd, min_hist_usd,
-       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at, us_price_usd, ps_detail_url, editions_json,
-       spanish_audio, spanish_text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       verdict, verdict_label, saving_usd, gift_card_rate, scraped_at,
+       us_price_usd, ps_detail_url, editions_json,
+       spanish_audio, spanish_text,
+       game_catalog_id, sony_alt_price_usd, sony_alt_region)
+    VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?,?,?,?, ?,?, ?,?,?)
   `);
 
   const rows = [];
 
-  for (let i = 0; i < catalog.length; i++) {
-    const game     = catalog[i];
-    const ps       = psResults[i];
-    const variants = ps?.variants || [];
+  for (const entry of catalog) {
+    const entryId = entry.id;
 
-    // Log games where PS Store returned nothing (helps debug Railway IP issues)
-    if (ps?.error) {
-      console.error(`[bulk] PS Store error for "${game.name}": ${ps.error}`);
-    } else if (!variants.length) {
-      console.warn(`[bulk] No PS Store result for "${game.name}" (ps.found=${ps?.best != null})`);
+    // ── Get sony data ────────────────────────────────────────────────────────
+    let sonyPriceUsd  = null;
+    let sonyPriceRaw  = null;
+    let discountPct   = 0;
+    let saleEnd       = null;
+    let detailUrl     = entry.sony_us_url || null;
+
+    if (urlResults[entryId]) {
+      const { sonyResult } = urlResults[entryId];
+      if (sonyResult) {
+        sonyPriceUsd = sonyResult.priceUsd;
+        sonyPriceRaw = sonyResult.priceRaw;
+        discountPct  = sonyResult.discountPct || 0;
+        saleEnd      = sonyResult.saleEnd || null;
+        // Record in price_history for trend tracking
+        try {
+          if (sonyPriceUsd) {
+            recordPrice(entry.display_name, 'psstore-us', sonyPriceUsd, {
+              raw: sonyPriceRaw, currency: 'USD', discount: discountPct, saleEnd,
+            });
+          }
+        } catch (_) {}
+      }
+    } else if (searchResults[entryId]) {
+      // Fallback from search
+      const sr      = searchResults[entryId];
+      const best    = sr?.variants?.[0] || sr?.best;
+      if (best) {
+        sonyPriceUsd = best.priceUsd;
+        sonyPriceRaw = best.priceRaw;
+        discountPct  = best.discountPct || 0;
+        saleEnd      = best.saleEnd || null;
+        detailUrl    = best.detailUrl || null;
+        // Store the found URL back into game_catalog for future use
+        if (best.detailUrl && !entry.sony_us_url) {
+          try {
+            updateGameCatalogEntry(entryId, {
+              sony_us_url:        best.detailUrl,
+              sony_us_confidence: 60, // search-found, not validated
+            });
+          } catch (_) {}
+        }
+        try {
+          if (sonyPriceUsd) {
+            recordPrice(entry.display_name, 'psstore-us', sonyPriceUsd, {
+              raw: sonyPriceRaw, currency: 'USD', discount: discountPct, saleEnd,
+            });
+          }
+        } catch (_) {}
+      }
     }
 
-    // Record the cheapest variant price FIRST so getMinHistoricalPrice includes it
-    if (variants.length > 0 && variants[0].priceUsd != null) {
-      try {
-        recordPrice(game.name, 'psstore-us', variants[0].priceUsd, {
-          raw:      variants[0].priceRaw,
-          currency: 'USD',
-          discount: variants[0].discountPct || 0,
-          saleEnd:  variants[0].saleEnd || null,
-        });
-      } catch (_) {}
+    // ── Get turkey data ──────────────────────────────────────────────────────
+    let turkeyPriceUsd = null;
+    let turkeyUrl      = entry.turkey_url || null;
+    let spanishAudio   = entry.spanish_audio || 0;
+    let spanishText    = entry.spanish_text  || 0;
+
+    if (urlResults[entryId]) {
+      const { turkeyResult } = urlResults[entryId];
+      if (turkeyResult) {
+        turkeyPriceUsd = turkeyResult.priceUsd;
+        spanishAudio   = turkeyResult.spanishAudio ? 1 : 0;
+        spanishText    = turkeyResult.spanishText  ? 1 : 0;
+      }
     }
+    // If no URL-based turkey result, try from search results (old behavior for no-URL entries)
+    // (search results don't include turkey — those entries get NO_DATA for turkey)
 
-    // Now query historical min — includes the price we just recorded
-    const minHist = getMinHistoricalPrice(game.name);
+    // ── Get min historical price from game_catalog ────────────────────────────
+    const minHist = entry.min_price_usd_alltime || null;
 
-    if (variants.length === 0) {
-      // No PS Store data — insert one placeholder row so the game still appears
-      const tHits  = fuseT.search(game.name);
-      const turkey = tHits.length ? tHits[0].item : null;
-      const lang   = turkey ? (langByUrl[turkey.url] || {}) : {};
-      const verdict = getVerdict(null, turkey?.priceUsd ?? null, { minHistoricalUsd: minHist, giftCardRate });
-      rows.push([
-        b(batchId), b(game.name), b(game.name),
-        null, null, 0, null,
-        b(turkey?.priceUsd) ?? null, b(turkey?.url) ?? null,
-        null, b(minHist) ?? null,
-        b(verdict.type), b(verdict.label), b(verdict.saving) ?? 0,
-        b(giftCardRate), b(now), null, null, null,
-        lang.spanishAudio ? 1 : 0, lang.spanishText ? 1 : 0,
-      ]);
-      continue;
-    }
+    // ── Compute real cost and verdict ─────────────────────────────────────────
+    const realCost = sonyPriceUsd != null ? Math.round(sonyPriceUsd * giftCardRate * 100) / 100 : null;
+    const verdict  = getVerdict(realCost, turkeyPriceUsd, { minHistoricalUsd: minHist, giftCardRate });
 
-    // Insert one row per edition/variant
-    for (const v of variants) {
-      const edTitle    = v.name || v.title || game.name;
-      const usPriceUsd = v.priceUsd ?? null;
-      const realCost   = usPriceUsd != null ? Math.round(usPriceUsd * giftCardRate * 100) / 100 : null;
+    // ── Alt region price ──────────────────────────────────────────────────────
+    const altPrice = altPrices[entryId]?.priceUsd ?? null;
 
-      // Match this specific edition title against Turkey catalog
-      const vHits  = fuseEdition.search(edTitle);
-      const turkey = vHits.length ? vHits[0].item : null;
-      const lang   = turkey ? (langByUrl[turkey.url] || {}) : {};
-
-      const verdict = getVerdict(realCost, turkey?.priceUsd ?? null, {
-        minHistoricalUsd: minHist,
-        giftCardRate,
-      });
-
-      rows.push([
-        b(batchId),
-        b(game.name),          // catalog_name — original catalog entry
-        b(edTitle),            // game_name — edition title shown in table
-        b(usPriceUsd),
-        b(v.priceRaw) ?? null,
-        b(v.discountPct) ?? 0,
-        b(v.saleEnd) ?? null,
-        b(turkey?.priceUsd) ?? null,
-        b(turkey?.url) ?? null,
-        b(realCost),
-        b(minHist) ?? null,
-        b(verdict.type),
-        b(verdict.label),
-        b(verdict.saving) ?? 0,
-        b(giftCardRate),
-        b(now),
-        b(usPriceUsd),
-        b(v.detailUrl) ?? null,
-        null,                  // editions_json — no longer needed
-        lang.spanishAudio ? 1 : 0,
-        lang.spanishText ? 1 : 0,
-      ]);
-    }
+    rows.push([
+      b(batchId),
+      b(entry.display_name),  // catalog_name
+      b(entry.display_name),  // game_name (shown in table)
+      b(sonyPriceUsd),
+      b(sonyPriceRaw),
+      b(discountPct) ?? 0,
+      b(saleEnd),
+      b(turkeyPriceUsd),
+      b(turkeyUrl),
+      b(realCost),
+      b(minHist),
+      b(verdict.type),
+      b(verdict.label),
+      b(verdict.saving) ?? 0,
+      b(giftCardRate),
+      b(now),
+      b(sonyPriceUsd),       // us_price_usd
+      b(detailUrl),          // ps_detail_url
+      null,                  // editions_json
+      spanishAudio ? 1 : 0,
+      spanishText  ? 1 : 0,
+      b(entryId),            // game_catalog_id
+      b(altPrice),           // sony_alt_price_usd
+      b(altRegion !== 'US' ? altRegion : null), // sony_alt_region
+    ]);
   }
 
   db.exec('BEGIN');
@@ -348,14 +395,15 @@ async function runBulkScrape(batchId) {
   }
 
   const withPrice = rows.filter(r => r[3] != null).length;
+  const withUrl   = withSonyUrl.length;
   activeBatch = {
     id: batchId, status: 'done', progress: 100,
-    message: `✅ Completado — ${catalog.length} títulos del catálogo → ${rows.length} ediciones | ${withPrice} con precio | ${rows.length - withPrice} sin precio`,
+    message: `✅ ${catalog.length} juegos | ${withUrl} por URL guardada | ${withoutSonyUrl.length} por búsqueda | ${withPrice} con precio`,
   };
   broadcastProgress(batchId, activeBatch);
   setTimeout(() => progressClients.delete(batchId), 60000);
 
-  // Auto-start history fetch for any new games without history (runs in background)
+  // Auto-run stats update
   setImmediate(() => {
     try { getHistoryRoute().startHistoryJob('auto-after-bulk'); } catch (_) {}
   });
