@@ -236,7 +236,9 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, altRegion, sho
   const [unvalidatedCount, setUnvalidatedCount] = useState(0);
 
   // ── History stats ───────────────────────────────────────────────────────────
-  const [histStats, setHistStats] = useState(null);
+  const [histStats,    setHistStats]    = useState(null);
+  const [histFetching, setHistFetching] = useState(false);
+  const histPollRef = useRef(null);
 
   // ── Integrated search ───────────────────────────────────────────────────────
   const [searchInput,   setSearchInput]   = useState('');
@@ -311,6 +313,37 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, altRegion, sho
     } catch (e) {
       setRunning(false);
       showToast?.(`Error: ${e.message}`);
+    }
+  }
+
+  // ── PSDeals history fetch ───────────────────────────────────────────────────
+  async function handleHistoryFetch() {
+    if (histFetching || running) return;
+    setHistFetching(true);
+    showToast?.('🎭 Iniciando actualización de historial PSDeals... puede tardar varios minutos');
+    try {
+      await api.startHistoryFetch();
+      // Poll every 30s until the job finishes
+      if (histPollRef.current) clearInterval(histPollRef.current);
+      histPollRef.current = setInterval(async () => {
+        try {
+          const { stats, active } = await api.getHistoryStatus();
+          if (stats) setHistStats(stats);
+          if (!active || active.status !== 'running') {
+            clearInterval(histPollRef.current);
+            histPollRef.current = null;
+            setHistFetching(false);
+            if (active?.status === 'done') showToast?.(`✅ ${active.message || 'Historial PSDeals actualizado'}`);
+          }
+        } catch (_) {
+          clearInterval(histPollRef.current);
+          histPollRef.current = null;
+          setHistFetching(false);
+        }
+      }, 30000);
+    } catch (err) {
+      showToast?.(`Error PSDeals: ${err.message}`);
+      setHistFetching(false);
     }
   }
 
@@ -392,12 +425,21 @@ export default function BulkTab({ giftCardRate: giftCardRateProp, altRegion, sho
               </span>
             )}
             {histStats && (
-              <span
-                style={{ fontSize: 11, color: 'var(--muted)', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, padding: '2px 8px' }}
-                title="Datos PSDeals almacenados en el catálogo. Crece con 'Actualizar historial'."
+              <button
+                onClick={handleHistoryFetch}
+                disabled={histFetching || running}
+                style={{
+                  fontSize: 11, color: histFetching ? 'var(--primary-h)' : 'var(--muted)',
+                  background: 'var(--surface)', border: '1px solid var(--border)',
+                  borderRadius: 6, padding: '2px 8px', cursor: histFetching ? 'default' : 'pointer',
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}
+                title={histFetching ? 'Actualizando historial PSDeals...' : 'Click para actualizar historial PSDeals (usa Playwright — puede tardar varios minutos)'}
               >
-                📊 PSDeals: {histStats.gamesWithHistory}/{histStats.totalGames} juegos con historial
-              </span>
+                {histFetching
+                  ? <><span className="spinner" style={{ width: 10, height: 10, borderWidth: 2 }} /> Actualizando PSDeals...</>
+                  : `📊 PSDeals: ${histStats.gamesWithHistory}/${histStats.totalGames} juegos con historial`}
+              </button>
             )}
           </div>
         </div>
