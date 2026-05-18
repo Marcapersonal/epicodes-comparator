@@ -14,8 +14,9 @@ const {
 } = require('../db/database');
 
 const { getVerdict }           = require('../services/comparison');
-const { fetchSonyPriceByUrl, bulkLookup } = require('../scrapers/psstore');
-const { fetchTurkeyPriceByUrl }           = require('../scrapers/gamesturkey');
+const { fetchSonyPriceByUrl, bulkLookup }              = require('../scrapers/psstore');
+const { fetchTurkeyPriceByUrl, scrapeAllProducts }     = require('../scrapers/gamesturkey');
+const Fuse = require('fuse.js');
 
 // Lazy-load history route to avoid playwright-extra patching Node at startup
 let _historyRoute = null;
@@ -210,7 +211,7 @@ async function runBulkScrape(batchId) {
     const result = await fetchByUrlWorker(entry);
     urlResults[entry.id] = result;
     urlDone++;
-    const pct = 5 + Math.round((urlDone / Math.max(withSonyUrl.length, 1)) * 45);
+    const pct = 5 + Math.round((urlDone / Math.max(withSonyUrl.length, 1)) * 35);
     emit({ message: `🔗 Precios por URL — ${urlDone}/${withSonyUrl.length} | ${entry.display_name}`, progress: pct });
     await delay(150 + Math.random() * 100);
     await urlNext();
@@ -224,12 +225,10 @@ async function runBulkScrape(batchId) {
   // Uses existing bulkLookup — same as old behavior
   let searchResults = {};
   if (withoutSonyUrl.length > 0) {
-    emit({ message: `🔍 Buscando ${withoutSonyUrl.length} juegos sin URL guardada en PS Store...`, progress: 52 });
+    emit({ message: `🔍 Buscando ${withoutSonyUrl.length} juegos sin URL guardada en PS Store...`, progress: 42 });
     const names    = withoutSonyUrl.map(e => e.display_name);
-    let   srDone   = 0;
     const rawResults = await bulkLookup(names, (prog) => {
-      srDone = prog.completed;
-      const pct = 52 + Math.round((prog.completed / prog.total) * 25);
+      const pct = 42 + Math.round((prog.completed / prog.total) * 18);
       emit({ message: `🔍 PS Store — ${prog.completed}/${prog.total} | ${prog.current}`, progress: pct });
     });
     // rawResults is array aligned with names
@@ -238,13 +237,69 @@ async function runBulkScrape(batchId) {
     }
   }
 
-  // ── Step 4: For URL-entries, also fetch alt-region price if available ──────
-  // (Do this in background after main results are ready — don't block the scrape)
-  // Alt region prices are fetched from stored sony_alt_url
+  // ── Step 3.5: Turkey fallback for entries WITHOUT stored turkey_url ────────
+  // Scrape all GamesturkeyACC categories once, then fuzzy-match each unlinked entry.
+  // Once a URL is found, it's stored in game_catalog so future refreshes skip this step.
+  const withoutTurkeyUrl   = catalog.filter(e => !e.turkey_url);
+  const turkeyFallbackPrices = {}; // entryId -> { priceUsd, priceRaw, url, confidence }
+
+  if (withoutTurkeyUrl.length > 0) {
+    emit({
+      message: `🇹🇷 Scrapeando GamesturkeyACC para ${withoutTurkeyUrl.length} juegos sin URL guardada...`,
+      progress: 61,
+    });
+    try {
+      const turkeyProducts = await scrapeAllProducts(undefined, (prog) => {
+        // Progress crawls from 61 → 72 as products accumulate (rough estimate ~600 products total)
+        const pct = 61 + Math.min(Math.round((prog.total / 700) * 11), 11);
+        emit({ message: `🇹🇷 Turkey — ${prog.total} productos | categoría #${prog.category}`, progress: pct });
+      });
+
+      if (turkeyProducts.length > 0) {
+        emit({ message: `🇹🇷 ${turkeyProducts.length} productos Turkey — cruzando con catálogo...`, progress: 73 });
+
+        const fuse = new Fuse(turkeyProducts, {
+          keys:         ['title'],
+          threshold:    0.45,
+          includeScore: true,
+        });
+
+        for (const entry of withoutTurkeyUrl) {
+          const hits = fuse.search(entry.display_name);
+          if (!hits.length) continue;
+
+          const best       = hits[0];
+          const confidence = Math.round((1 - (best.score ?? 0)) * 100);
+          const product    = best.item;
+
+          if (!product.priceUsd) continue;
+
+          turkeyFallbackPrices[entry.id] = {
+            priceUsd:   product.priceUsd,
+            priceRaw:   product.priceRaw,
+            url:        product.url,
+            confidence,
+          };
+
+          // Persist the found URL so next refresh uses fetchTurkeyPriceByUrl (faster)
+          try {
+            updateGameCatalogEntry(entry.id, {
+              turkey_url:        product.url,
+              turkey_confidence: Math.min(100, confidence),
+            });
+          } catch (_) {}
+        }
+      }
+    } catch (err) {
+      console.warn('[bulk] Turkey fallback scrape failed:', err.message);
+    }
+  }
+
+  // ── Step 4: Alt-region prices from stored sony_alt_url ────────────────────
   const altPrices = {};
   const altEntries = withSonyUrl.filter(e => e.sony_alt_url);
   if (altEntries.length > 0) {
-    emit({ message: `🌍 Obteniendo precios de región ${altRegion}...`, progress: 78 });
+    emit({ message: `🌍 Obteniendo precios de región ${altRegion}...`, progress: 75 });
     let altDone = 0;
     for (const entry of altEntries) {
       try {
@@ -253,14 +308,14 @@ async function runBulkScrape(batchId) {
       } catch (_) {}
       altDone++;
       if (altDone % 5 === 0) {
-        emit({ message: `🌍 Región ${altRegion} — ${altDone}/${altEntries.length}`, progress: 78 + Math.round(altDone / altEntries.length * 5) });
+        emit({ message: `🌍 Región ${altRegion} — ${altDone}/${altEntries.length}`, progress: 75 + Math.round(altDone / altEntries.length * 5) });
       }
       await delay(100);
     }
   }
 
   // ── Step 5: Cross-match and save ─────────────────────────────────────────
-  emit({ message: '💾 Cruzando datos y guardando...', progress: 85 });
+  emit({ message: '💾 Cruzando datos y guardando...', progress: 82 });
 
   const insertBulk = db.prepare(`
     INSERT INTO bulk_results
@@ -337,15 +392,20 @@ async function runBulkScrape(batchId) {
     let spanishText    = entry.spanish_text  || 0;
 
     if (urlResults[entryId]) {
+      // Entry had a stored turkey_url → fetched via fetchTurkeyPriceByUrl (most accurate)
       const { turkeyResult } = urlResults[entryId];
       if (turkeyResult) {
         turkeyPriceUsd = turkeyResult.priceUsd;
         spanishAudio   = turkeyResult.spanishAudio ? 1 : 0;
         spanishText    = turkeyResult.spanishText  ? 1 : 0;
       }
+    } else if (turkeyFallbackPrices[entryId]) {
+      // Entry had no turkey_url → matched via full Turkey catalog scrape + Fuse
+      // (Language data not yet available; will be populated on next refresh once URL is stored)
+      const tf = turkeyFallbackPrices[entryId];
+      turkeyPriceUsd = tf.priceUsd;
+      turkeyUrl      = tf.url;           // persist matched URL in this row
     }
-    // If no URL-based turkey result, try from search results (old behavior for no-URL entries)
-    // (search results don't include turkey — those entries get NO_DATA for turkey)
 
     // ── Get min historical price from game_catalog ────────────────────────────
     const minHist = entry.min_price_usd_alltime || null;
@@ -394,11 +454,13 @@ async function runBulkScrape(batchId) {
     throw e;
   }
 
-  const withPrice = rows.filter(r => r[3] != null).length;
-  const withUrl   = withSonyUrl.length;
+  const withPrice        = rows.filter(r => r[3] != null).length;
+  const withTurkeyPrice  = rows.filter(r => r[7] != null).length;
+  const withUrl          = withSonyUrl.length;
+  const turkeyFallback   = Object.keys(turkeyFallbackPrices).length;
   activeBatch = {
     id: batchId, status: 'done', progress: 100,
-    message: `✅ ${catalog.length} juegos | ${withUrl} por URL guardada | ${withoutSonyUrl.length} por búsqueda | ${withPrice} con precio`,
+    message: `✅ ${catalog.length} juegos | ${withPrice} con precio Sony | ${withTurkeyPrice} con precio Turkey (${withoutTurkeyUrl.length - turkeyFallback > 0 ? `${withoutTurkeyUrl.length - Object.keys(turkeyFallbackPrices).length} sin match Turkey` : 'todos matcheados'})`,
   };
   broadcastProgress(batchId, activeBatch);
   setTimeout(() => progressClients.delete(batchId), 60000);
